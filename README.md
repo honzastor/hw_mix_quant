@@ -5,7 +5,7 @@ This repository contains the source code for a specialized framework focused on 
 ## File Structure
 
 - `README.md` - README description of the framework
-- `setup.sh` - shell script for setting up the necessary environment
+- `requirements.yml` - requirements file for setting up the necessary environment
 - `run_nsga.sh` - shell script for running the nsga experiment
 - `src/` - the main directory containing all the source code
     - `run_nsga.py` - script interface to initiate and run the nsga process
