@@ -1,138 +1,47 @@
-# Automated Quantization of Neural Networks
+# Mixed-Precision Quantization (PyTorch) Framework for Deep Neural Networks
 
-###### Bachelor thesis - Miroslav Šafář (xsafar23@stud.fit.vutbr.cz)
+This repository contains the source code for a specialized framework focused on mixed-precision quantization of neural networks. The framework leverages NSGA-II for searching optimal quantization configurations and an extended version of Timeloop to model mixed-precision data types for hardware metrics retrieval.
 
-## File structure
+## File Structure
 
-- `src/` - source code of proposed system
-- `karolina/` - scripts used for running experiments on Karolina supercomputer
-- `nsga_runs/` - folder that contains system runs referred to in the paper
-- `latex/` - source code of the paper
-- `automated_quantization_of_neural_networks_paper.pdf` - bachelor thesis paper
-- `README.md` - README
-- `tiny_imagenet100.tar` - dataset used for experiments
-- `environment_linux_x86.yml` - conda environment file for Linux
-- `environment_macos_arm64.yml` - conda environment file for macOS with Apple Silicon
+- `README.md` - README description of the framework
+- `setup.sh` - shell script for setting up the necessary environment
+- `run_nsga.sh` - shell script for running the nsga experiment
+- `src/` - the main directory containing all the source code
+    - `run_nsga.py` - script interface to initiate and run the nsga process
+    - `mapper_facade.py` - interface script for calling timeloop-mapper and caching hardware results
+    - `nsga/` - contains scripts related to NSGA-II algorithm
+    - `pytorch/` - includes all scripts related to PyTorch models, data management, training, evaluation, and utilities implementation
+    - `timeloop_utils/` - contains Timeloop interface configurations and helper scripts
 
 ## Project Setup
 
-### Preferred: Conda
+### Environment Setup
 
-We provide conda environment file to setup conda environment.
-
-On Apple Silicon computers:
+#### Preferred: Conda
 
 ```shell
-$ conda env create --file environment_macos_arm64.yml
+$ conda env create --file requirements.yml
+$ conda activate qatizer
 ```
 
-On Linux:
+#### PIP
 
 ```shell
-$ conda env create --file environment_linux_x86.yml
+$ pip install -r requirements.yml
 ```
 
-**WARNING:** Linux environment does not contains libraries for GPU acceleration.
+- **IMPORTANT NOTE**: `mapper_facade.py` requires Timeloop+Accelergy infrastructure to be installed. If it is not installed, you will need to use docker or load cached HW metrics – in that case, modifications to `mapper_facade.py` might be necessary. 
 
-Then you can activate created conda environment by using:
-```shell
-$ conda activate bachelor_thesis
-```
 
-### PIP
+### Datasets
 
-There is another option to setup the project environment using pip.
-We recommend using Python 3.10.9 and a virtual environment. You can install all required packages using pip:
+- Please download your desired datasets into the  `src/pytorch/data/datasets/` folder. See README instructions there for file structure information.
 
-```shell
-$ pip install -r requirements_macos_arm64.txt
-```
+### Running NSGA-II
 
-**WARNING:** You can use this option only with Apple Silicon computer. With linux please use conda environment.
+- `run_nsga.sh` - Script to run NSGA-II algorithm, tailored for mixed-precision quantization tasks (MODIFY AS YOU WISH).
 
-### Tinyimagenet dataset
+### Training/Evaluation of Models
 
-For testing purposes, we provide our tiny-imagenet dataset. To use it you need to extract 
-`tiny_imagenet100.tar` into your TensorFlow Datamodels folder (default: `~/tensorflow_datasets`).
-
-### Create pre-trained Mobilenet model
-
-Switch to the source directory:
-
-```shell
-$ cd src
-```
-
-To create and train MobileNet model on tiny-imagenet dataset use:
-
-```shell
-$ python3 mobilenet_tinyimagenet_train.py --alpha 0.25 --save-as mobilenet_tinyimagenet_025.keras
-```
-
-If you already have a weights file for a model, you can create it using:
-
-```shell
-$ python3 mobilenet_tinyimagenet_create.py --alpha 0.25 --weights-path weights_025.hfd5 --destination mobilenet_tinyimagenet_025.keras
-```
-
-## Run NSGA-II
-
-Switch to the source directory:
-
-```shell
-$ cd src
-```
-
-To run NSGA-II for per-layer asymmetric quantization with the approximate solution for batch normalization folding use:
-
-```shell
-$ python3 run_nsga.py --generations 20 --parent-size 16 --offspring-size 16 --logs-dir <nsga_run_log_dir> --approx
-```
-
-By default, it uses pre-trained MobileNet model saved as `mobilenet_tinyimagenet_025.keras`,
-to use different pre-trained model, specify parameter `--base-model-path`.
-
-Other important parameters:
-
-- `--per-channel` use per-channel weight quantization for convolutional layers
-- `--symmetric` use symmetric quantization for weights
-- `--batch-size` batch size for quantization-aware training
-- `--epochs` number of epochs for partial tuning of models
-- `--multigpu` run on multiple gpus
-- `--help` to print list of all script parameters
-
-Then evaluate the final results with full fine-tuning of the quantized models using:
-
-For evaluation of per-layer asymmetric quantization using more accurate method for batch normalization folding use:
-
-```shell
-python3 nsga_evaluate.py --run <nsga_run_log_dir>/<run_file>
-```
-
-For evaluation of per-layer asymmetric quantization using approximate method for batch normalization folding use:
-
-```shell
-python3 nsga_evaluate.py --run <nsga_run_log_dir>/<run_file> --approx
-```
-
-For evaluation of per-channel symmetric quantization use:
-
-```shell
-python3 nsga_evaluate.py --run <nsga_run_log_dir> --approx --per-channel --symmetric
-```
-
-Other important parameters:
-
-- `--batch-size` batch size for quantization-aware training
-- `--epochs` number of epochs for final fine-tuning
-- `--multigpu` run on multiple gpus
-- `--help` to print a list of all script parameters
-
-## Visualization of results
-
-To view system results use:
-```shell
-python3 show_layer_configuration.py --run <nsga_run_log_dir> [--per-channel] [--symmetric]
-```
-This script allows you to choose between best-found configurations and then shows you the bit-width for each layer.
-
+- `src/pytorch/run_scripts/` - For (quantization-aware) training and or evaluation of a PyTorch model, you can create scripts to run the `train.py` and `run.py` scripts located in `src/pytorch/`.
