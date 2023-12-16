@@ -1,8 +1,0 @@
-logs
-checkpoints
-fig
-.ipynb_checkpoints
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-.DS_Store

@@ -1,4 +1,3 @@
-# Project: Bachelor Thesis: Automated Quantization of Neural Networks
 # Author: Miroslav Safar (xsafar23@stud.fit.vutbr.cz)
 
 import abc
@@ -10,8 +9,8 @@ import os
 import random
 import re
 from shutil import copyfile
+from typing import Dict, List, Tuple, Any
 
-import tensorflow as tf
 from paretoarchive.core import PyBspTreeArchive
 
 
@@ -21,11 +20,15 @@ class NSGAAnalyzer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def analyze(self, configurations):
+    def analyze(self, configurations: List) -> List:
         """
-        This method analyzes chromosomes and returns them with their evaluation
-        :param configurations: List of configurations that needs to be analyzes
-        :return: List of configurations with added evaluation of each one
+        This method analyzes a list of chromosomes and returns them with their evaluations.
+
+        Args:
+            configurations (List): A list of configurations (chromosomes) that need to be analyzed.
+
+        Returns:
+            List: A list of configurations with evaluations added to each one.
         """
         pass
 
@@ -35,65 +38,85 @@ class NSGAState:
     State of the NSGA-II
     """
 
-    def __init__(self, generation=None, parents=None, offsprings=None):
+    def __init__(self, generation: int = None, parents: List = None, offsprings: List = None) -> None:
         """
-        Constructs NSGAState
+        Initializes an NSGAState instance.
 
-        :param generation: Current generation
-        :param parents: Current parents
-        :param offsprings: Current offsprings list
+        Args:
+            generation (int): The current generation number. Defaults to None.
+            parents (List): The current list of parent chromosomes. Defaults to None.
+            offsprings (List): The current list of offspring chromosomes. Defaults to None.
         """
         self._generation = generation
         self._parents = parents
         self._offsprings = offsprings
         self._restored = False
 
-    def get_generation(self):
+    def get_generation(self) -> int:
         """
-        Returns current number of generationm
-        :return: Number of generation
+        Returns the current generation number.
+
+        Returns:
+            int: The number of the current generation.
         """
         return self._generation
 
-    def get_parents(self):
+    def get_parents(self) -> List:
         """
-        Return current parents
-        :return: List of parents
+        Retrieves the current list of parent chromosomes.
+
+        Returns:
+            List: The current list of parent chromosomes.
         """
         return self._parents
 
-    def get_offsprings(self):
+    def get_offsprings(self) -> List:
         """
-        Get current offsprings
-        :return: List of offsprings
+        Retrieves the current list of offspring chromosomes.
+
+        Returns:
+            List: The current list of offspring chromosomes.
         """
         return self._offsprings
 
-    def save_to(self, logs_dir):
+    def save_to(self, logs_dir: str) -> None:
         """
-        Saves state to file
-        :param logs_dir: Path to logs directory
+        Saves the current state to a file in the specified directory.
+
+        Args:
+            logs_dir (str): The path to the directory where the state file will be saved.
         """
         if self._restored:
             return
         json.dump({"parent": self._parents, "offspring": self._offsprings},
                   gzip.open(logs_dir + "/run.%05d.json.gz" % self._generation, "wt", encoding="utf8"))
 
-    def set_offsprings(self, new_offsprings):
+    def set_offsprings(self, new_offsprings: List) -> None:
         """
-        Sets offsprings in the state
-        :param new_offsprings: List of offsprings that replaces current list of offsprings
+        Updates the list of offsprings in the state.
+
+        Args:
+            new_offsprings (List): The new list of offsprings to be set.
         """
         self._offsprings = new_offsprings
 
     @classmethod
-    def restore_from(cls, run_file: str):
+    def restore_from(cls, run_file: str) -> "NSGAState":
+        """
+        Restores and returns an NSGAState instance from a saved state file.
+
+        Args:
+            run_file (str): The path to the file containing the saved state.
+
+        Returns:
+            NSGAState: An instance of NSGAState restored from the specified file.
+        """
         print("# loading %s" % run_file)
         pr = json.load(gzip.open(run_file))
         parents = pr["parent"]
         offsprings = pr["offspring"]
         generation = int(re.match(r".*run\.(\d+).json.gz", run_file).group(1))
-        tf.print(f"Restored generation {generation} with {len(parents)} parents and {len(offsprings)} offsprings")
+        print(f"Restored generation {generation} with {len(parents)} parents and {len(offsprings)} offsprings")
         res_state = cls(generation=generation, parents=parents, offsprings=offsprings)
         res_state._restored = True
         return res_state
@@ -101,19 +124,24 @@ class NSGAState:
 
 class NSGA(abc.ABC):
     """
-    Implementation of NSGA algorith
+    Abstract base class for the implementation of the NSGA algorithm.
     """
 
-    def __init__(self, logs_dir, parent_size=50, offspring_size=50, generations=25, objectives=None, previous_run=None):
+    def __init__(self, logs_dir: str, parent_size: int = 10, offspring_size: int = 10,
+                 generations: int = 25, objectives: List = None, previous_run: str = None) -> None:
         """
-        Constructs NSGA
+        Initializes an NSGA instance with the specified parameters.
 
-        :param logs_dir: Path to log directory
-        :param parent_size: Number of parents
-        :param offspring_size: number of offsprings
-        :param generations: Number of generations
-        :param objectives: List of watched objectives
-        :param previous_run: Path to previous run to restore from there
+        Args:
+            logs_dir (str): Path to the log directory.
+            parent_size (int): Number of parents. Defaults to 10.
+            offspring_size (int): Number of offsprings. Defaults to 10.
+            generations (int): Number of generations. Defaults to 25.
+            objectives (List): List of objectives for the optimization. Defaults to None.
+            previous_run (str): Path to the previous run to restore from. Defaults to None.
+
+        Raises:
+            ValueError: If any of the input parameters are invalid.
         """
         if logs_dir is None:
             raise ValueError(f"Logs directory needs to be defined")
@@ -147,10 +175,12 @@ class NSGA(abc.ABC):
         if previous_run is None:
             self._check_if_empty()
 
-    def _restore_state(self, previous_run):
+    def _restore_state(self, previous_run: str) -> None:
         """
-        Restores state from previous run
-        :param previous_run: Path to previous run log dir
+        Restores the state of the NSGA algorithm from a previous run.
+
+        Args:
+            previous_run (str): Path to the directory containing the logs of the previous run.
         """
         df = glob.glob(previous_run + "/run.*.gz")
         if self.logs_dir != previous_run:
@@ -161,22 +191,28 @@ class NSGA(abc.ABC):
         d = df[-1]
         self.state = NSGAState.restore_from(run_file=d)
 
-    def ensure_logs_dir(self):
+    def ensure_logs_dir(self) -> None:
         """
-        Ensures logs directory is created
+        Ensures logs directory exists.
         """
         try:
             os.makedirs(self.logs_dir)
         except FileExistsError:
             pass  # Folder already exists no need to create it
 
-    def _check_if_empty(self):
+    def _check_if_empty(self) -> None:
+        """
+        Checks if the logs directory is empty. If not, exits the program.
+        """
         files = os.listdir(self.logs_dir)
         if len(files) > 0:
             print("ERROR: Folder for new run is not empty")
             exit(1)
 
-    def _generate_run_information(self):
+    def _generate_run_information(self) -> None:
+        """
+        Generates and saves the configuration information for the current run.
+        """
         print("Generation configuration information to " + os.path.abspath(self.logs_dir + "/configuration.json"))
         run_info = {
             "start_time": datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'),
@@ -186,39 +222,57 @@ class NSGA(abc.ABC):
             json.dump(run_info, outfile)
 
     @abc.abstractmethod
-    def get_configuration(self):
+    def get_configuration(self) -> Dict:
+        """
+        Abstract method to retrieve the configuration of the NSGA algorithm.
+
+        Returns:
+            Dict: A dictionary containing the configuration settings.
+        """
         pass
 
-    def get_pareto_front(self, values):
+    def get_pareto_front(self, values: List) -> List[int]:
         """
-        Returns pareto front from values
-        :param values: Data
-        :return: pareto front from data by watched objectives (list of indexes in original data)
-        """
+        Returns the Pareto front from a set of values based on the defined objectives.
 
-        def map_obj_list(value):
+        Args:
+            values (List): A list of data points to evaluate.
+
+        Returns:
+            List[int]: Indices of data points that form the Pareto front.
+        """
+        def map_obj_list(value) -> List[float]:
+            """
+            Maps a data point to a list of objective values, possibly negating some to handle maximization objectives.
+
+            Args:
+                value: A data point.
+
+            Returns:
+                List[float]: A list of transformed objective values.
+            """
             return [value[obj[0]] * (-1 if obj[1] else 1) for obj in self.objectives]
 
-        pareto_ids = PyBspTreeArchive(len(self.objectives)).filter([map_obj_list(x) for x in values],
-                                                returnIds=True)
-
+        pareto_ids = PyBspTreeArchive(len(self.objectives)).filter([map_obj_list(x) for x in values], returnIds=True)
         return pareto_ids
 
     def get_current_state(self) -> NSGAState:
         """
-        Get current state of NSGA
-        :return: Current state of NSGA
+        Retrieves the current state of the NSGA algorithm.
+
+        Returns:
+            NSGAState: The current state of the algorithm.
         """
         return self.state
 
-    def run_next_generation(self):
+    def run_next_generation(self) -> None:
         """
-        Run one NSGA generation
+        Runs one generation of the NSGA algorithm.
         """
         current_state = self.get_current_state()
         g = self.get_current_state().get_generation()
         print("Generation %d" % g)
-        tf.print("generation:%d;cache=%s" % (g, str(self.get_analyzer())))
+        print("generation:%d;cache=%s" % (g, str(self.get_analyzer())))
         # initial results from previous data:
         analyzed_offsprings = list(self.get_analyzer().analyze(current_state.get_offsprings()))
         current_state.set_offsprings(analyzed_offsprings)
@@ -248,9 +302,9 @@ class NSGA(abc.ABC):
         # set new state
         self.state = NSGAState(generation=g + 1, parents=next_parents, offsprings=offsprings)
 
-    def run(self):
+    def run(self) -> None:
         """
-        Runs specified number of generations
+        Runs the NSGA algorithm for the specified number of generations.
         """
         if self.state is None:
             self._generate_run_information()
@@ -262,11 +316,15 @@ class NSGA(abc.ABC):
         while self.get_current_state().get_generation() <= self.generations:
             self.run_next_generation()
 
-    def generate_offsprings(self, *, parents):
+    def generate_offsprings(self, parents: List) -> List:
         """
-        Generate offsprings from parents using crossover and mutation
-        :param parents: List of parents
-        :return: list of generated offsprings
+        Generate offsprings from parents using crossover and mutation.
+
+        Args:
+            parents (List): List of parent chromosomes.
+
+        Returns:
+            List: A list of generated offspring chromosomes.
         """
         offsprings = []
         for i in range(0, self.offspring_size):
@@ -277,11 +335,15 @@ class NSGA(abc.ABC):
 
         return offsprings
 
-    def crowding_distance(self, pareto_front):
+    def crowding_distance(self, pareto_front: List) -> List[Tuple]:
         """
-        Calculates crowding distance for each individual
-        :param pareto_front: Set of individuals
-        :return: list of pairs of individual and its crowding distance
+        Calculates crowding distance for each individual in the Pareto front.
+
+        Args:
+            pareto_front (List): Set of individuals on the Pareto front.
+
+        Returns:
+            List[Tuple]: A list of pairs (individual, crowding distance).
         """
         park = list(enumerate(pareto_front))
         distance = [0 for _ in range(len(pareto_front))]
@@ -296,12 +358,16 @@ class NSGA(abc.ABC):
                         max_val - min_val)
         return zip(pareto_front, distance)
 
-    def crowding_reduce(self, pareto_front, number):
+    def crowding_reduce(self, pareto_front: List, number: int) -> List:
         """
-        Reduces pareto front to only <number> of individuals based on crowding distance
-        :param pareto_front: Set of individuals
-        :param number: Required number of individuals
-        :return: reduced set
+        Reduces the Pareto front to a specified number (see `number`) of individuals based on crowding distance.
+
+        Args:
+            pareto_front (List): Set of individuals on the Pareto front.
+            number (int): The desired number of individuals to retain.
+
+        Returns:
+            List: A reduced set of individuals from the Pareto front.
         """
         pareto_front = pareto_front
         while len(pareto_front) > number:
@@ -311,33 +377,56 @@ class NSGA(abc.ABC):
             pareto_front = [x[0] for x in vals[:-1]]  # remove last
         return pareto_front
 
-    def get_analyzer(self):
+    def get_analyzer(self) -> NSGAAnalyzer:
         """
-        Get analyzer, if it was not created, initialize it
-        :return: NSGAAnalyzer
+        Retrieves the NSGA analyzer. Initializes it if it has not been created.
+
+        Returns:
+            NSGAAnalyzer: The analyzer used for NSGA.
         """
         if self.analyzer is None:
             self.analyzer = self.init_analyzer()
         return self.analyzer
 
     @abc.abstractmethod
-    def crossover(self, parents):
-        """Returns child"""
+    def crossover(self, parents: List) -> Any:
+        """
+        Performs the crossover operation to generate a child from given parents.
+
+        Args:
+            parents (List): The parent chromosomes used for crossover.
+
+        Returns:
+            The resulting child chromosome after crossover.
+        """
         pass
 
     @abc.abstractmethod
-    def get_maximal(self):
-        """Returns maximal values for objectives"""
+    def get_maximal(self) -> List:
+        """
+        Retrieves maximal values for the optimization objectives.
+
+        Returns:
+            List: Maximal values for each objective.
+        """
         pass
 
     @abc.abstractmethod
     def init_analyzer(self) -> NSGAAnalyzer:
-        """Returns analyzer"""
+        """
+        Initializes and returns the NSGA analyzer.
+
+        Returns:
+            NSGAAnalyzer: The initialized analyzer for NSGA.
+        """
         pass
 
     @abc.abstractmethod
-    def get_init_parents(self):
+    def get_init_parents(self) -> List:
         """
-        Returns initial parents for first population
+        Generates and returns the initial set of parent chromosomes for the first population.
+
+        Returns:
+            List: The initial set of parent chromosomes.
         """
         pass

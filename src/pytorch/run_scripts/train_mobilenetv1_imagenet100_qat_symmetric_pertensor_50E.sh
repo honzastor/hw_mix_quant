@@ -1,0 +1,24 @@
+export CUDA_VISIBLE_DEVICES=0
+python3 -W ignore ../train.py                            \
+ --arch mobilenetv1                                      \
+ --pretrained                                            \
+ --pretrained_model ../checkpoints/mnv1_init/chkpt_mobilenetv1_imagenet100_20231215_021355/model_best.pth.tar                                                     \
+ --checkpoint_path ../checkpoints/mnv1_QAT_sym_pertensor \
+ --data ../data/datasets/imagenet100                     \
+ --dataset_name imagenet100                              \
+ --workers 4                                             \
+ --train_batch 128                                       \
+ --test_batch 512                                        \
+ --manual_seed 42                                        \
+ --epochs 50                                             \
+ --act_function relu                                     \
+ --qat                                                   \
+ --symmetric_quant                                       \
+ --quant_setting uniform                                 \
+ --uniform_width 8                                       \
+ --lr 0.05                                               \
+ --wd 0.00004                                            \
+ --wandb                                                 \
+ --wandb_project MobileNet-QAT-Playground                \
+ --wandb_entity honzastor                                \
+ -v               

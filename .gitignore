@@ -1,3 +1,11 @@
-envs
-.DS_Store
-.idea
+__pycache__/
+*.json.gz
+*.pth.tar
+*.out
+*.json
+cache_size.py
+checkpoints/
+logs/
+cifar10/
+imagenet/
+imagenet100/

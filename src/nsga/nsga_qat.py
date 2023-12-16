@@ -1,133 +1,226 @@
-# Project: Bachelor Thesis: Automated Quantization of Neural Networks
-# Author: Miroslav Safar (xsafar23@stud.fit.vutbr.cz)
+# Author: Miroslav Safar (xsafar23@stud.fit.vutbr.cz), Jan Klhufek (iklhufek@fit.vut.cz)
 
-import glob
-import gzip
-import json
 import os
+import glob
+import json
+import gzip
 import random
-
-from collections import OrderedDict
-
 import numpy as np
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow_model_optimization.python.core.quantization.keras.quantize_wrapper import QuantizeWrapperV2
+import argparse
+import time
+import datetime
+import copy
+import torch
+import torchvision.models as models
+from collections import OrderedDict
+from typing import Optional, Dict, List, Any
 
-import calculate_model_size_lib as calculate_model_size
-import mobilenet_tinyimagenet_qat
+from .nsga import NSGA, NSGAAnalyzer
+from pytorch import train
+import pytorch.models as custom_models
 from mapper_facade import MapperFacade
-from nsga.nsga import NSGA
-from nsga.nsga import NSGAAnalyzer
-from tf_quantization.layers.approx.quant_conv2D_batch_layer import ApproxQuantFusedConv2DBatchNormalizationLayer
-from tf_quantization.layers.approx.quant_depthwise_conv2d_bn_layer import \
-    ApproxQuantFusedDepthwiseConv2DBatchNormalizationLayer
-from tf_quantization.layers.quant_conv2D_batch_layer import QuantFusedConv2DBatchNormalizationLayer
-from tf_quantization.layers.quant_depthwise_conv2d_bn_layer import QuantFusedDepthwiseConv2DBatchNormalizationLayer
-from tf_quantization.quantize_model import quantize_model
-from tf_quantization.transforms.quantize_transforms import PerLayerQuantizeModelTransformer
+from mapper_facade import JSONEncoder
+
+
+# Get list of PyTorch model names
+torch_model_names = sorted(name for name in models.__dict__
+                           if name.islower() and not name.startswith("__")
+                           and callable(models.__dict__[name]))
+
+# List of your custom model names
+customized_models_names = sorted(name for name in custom_models.__dict__
+                                 if name.islower() and not name.startswith("__")
+                                 and callable(custom_models.__dict__[name]))
+
+model_names = torch_model_names + customized_models_names
+
+for name in custom_models.__dict__:
+    if name.islower() and not name.startswith("__") and callable(custom_models.__dict__[name]):
+        models.__dict__[name] = custom_models.__dict__[name]
 
 
 class QATNSGA(NSGA):
     """
-    NSGA-II for proposed system, it uses QAT Analyzer for evaluation of individuals
+    NSGA-II for proposed framework, it uses QAT Analyzer for evaluation of individuals
     """
 
-    def __init__(self, logs_dir, base_model_path, parent_size=50, offspring_size=50, generations=25, batch_size=128,
-                 qat_epochs=10, previous_run=None, cache_datasets=False, approx=False, activation_quant_wait=0,
-                 per_channel=True, symmetric=True, learning_rate=0.2, timeloop_heuristic="random",
-                 timeloop_architecture="eyeriss", model_name="mobilenet", bn_freeze=25):
-        super().__init__(logs_dir=logs_dir,
-                         parent_size=parent_size, offspring_size=offspring_size, generations=generations,
-                         objectives=[("accuracy", True), ("total_edp", False)],
-                         previous_run=previous_run
-                         )
-        self.base_model_path = base_model_path
-        self.batch_size = batch_size
-        self.qat_epochs = qat_epochs
-        self.cache_datasets = cache_datasets
-        self.approx = approx
-        self.activation_quant_wait = activation_quant_wait
-        self.per_channel = per_channel
-        self.symmetric = symmetric
-        self.learning_rate = learning_rate
-        self.timeloop_heuristic = timeloop_heuristic
-        self.timeloop_architecture = timeloop_architecture
-        self.model_name = model_name
-        self.bn_freeze = bn_freeze
-        self.quantizable_layers = self.get_analyzer().get_number_of_quantizable_layers()
+    def __init__(self, data: str, dataset_name: str, pretrained_model: str, arch: str = "mobilenetv1", pretrained: bool = False,
+                 act_function: str = "relu", symmetric_quant: bool = False, per_channel_quant: bool = False, workers: int = 4, train_batch: int = 256, test_batch: int = 512, generations: int = 25, parent_size: int = 10, offspring_size: int = 10, timeloop_architecture: str = "eyeriss", timeloop_heuristic: str = "random", total_valid: int = 0, primary_metric: str = "edp", secondary_metric: Optional[str] = "", previous_run: Optional[str] = None, qat_epochs: int = 10, lr: float = 0.1, lr_type: str = "cos", gamma: float = 0.1, momentum: float = 0.9, weight_decay: float = 1e-5, manual_seed: int = 42, deterministic: bool = False, cache_datasets: bool = False, logs_dir: str = "/tmp/run" + datetime.datetime.now().strftime("-%Y%m%d-%H%M"), verbose: bool = False, **kwargs):
+        """
+        Initialize the class with various parameters for QAT and NSGA-II algorithm.
 
-    def get_configuration(self):
+        Args:
+            data (str): Path to the training dataset.
+            dataset_name (str): Name of the dataset.
+            pretrained_model (str): Path to the saved model checkpoint.
+            arch (str): Model architecture. Defaults to "mobilenetv1".
+            act_function (str): Name of activation function to be used in the model. Defaults to "relu".
+            pretrained (bool): Whether to use a pretrained model. Defaults to False.
+            symmetric_quant (bool): Use symmetric or asymmetric quantization. Defaults to False.
+            per_channel_quant (bool): Use per-channel or per-tensor quantization. Defaults to False.
+            workers (int): Number of data loading workers. Defaults to 4.
+            train_batch (int): Training batch size. Defaults to 256.
+            test_batch (int): Testing batch size. Defaults to 512.
+            generations (int): Number of generations in NSGA-II. Defaults to 25.
+            parent_size (int): Number of parents in NSGA-II population. Defaults to 10.
+            offspring_size (int): Number of offsprings in NSGA-II generation. Defaults to 10.
+            timeloop_architecture (str): HW architecture name for timeloop. Defaults to "eyeriss".
+            timeloop_heuristic (str): Heuristic type for timeloop-mapper. Defaults to "random".
+            total_valid (int): Number of total valid mappings in timeloop. Defaults to 0.
+            primary_metric (str): Primary metric for timeloop optimization. Defaults to "edp".
+            secondary_metric (Optional[str]): Secondary metric for timeloop optimization. Defaults to "".
+            previous_run (Optional[str]): Logs directory of the previous run. None by default.
+            qat_epochs (int): Number of epochs for QAT of each individual. Defaults to 10.
+            lr (float): Initial learning rate. Defaults to 0.1.
+            lr_type (str): Type of learning rate scheduler. Defaults to "cos".
+            gamma (float): Multiplier for learning rate adjustment. Defaults to 0.1.
+            momentum (float): Momentum for optimizer. Defaults to 0.9.
+            weight_decay (float): Weight decay for optimizer. Defaults to 1e-5.
+            manual_seed (int): Seed for reproducibility. Defaults to 42.
+            deterministic (bool): Enable deterministic mode in CUDA. Defaults to False.
+            cache_datasets (bool): Cache datasets during QAT. Defaults to False.
+            logs_dir (str): Directory for logging. Defaults to a temporary directory.
+            verbose (bool): Enable verbose output. Defaults to False.
+        """
+        super().__init__(logs_dir=logs_dir, parent_size=parent_size, offspring_size=offspring_size, generations=generations,
+                         objectives=[("accuracy", True), (f"total_{primary_metric}", False)], previous_run=previous_run)
+        self._data = data
+        self._dataset_name = dataset_name
+        self._pretrained_model = pretrained_model
+        self._arch = arch
+        self._act_function = act_function
+        self._pretrained = pretrained
+        self._symmetric_quant = symmetric_quant
+        self._per_channel_quant = per_channel_quant
+        self._workers = workers
+        self._train_batch = train_batch
+        self._test_batch = test_batch
+        self._parent_size = parent_size
+        self._offspring_size = offspring_size
+        self._generations = generations
+        self._timeloop_architecture = timeloop_architecture
+        self._timeloop_heuristic = timeloop_heuristic
+        self._total_valid = total_valid
+        self._primary_metric = primary_metric
+        self._secondary_metric = secondary_metric
+        self._previous_run = previous_run
+        self._qat_epochs = qat_epochs
+        self._lr = lr
+        self._lr_type = lr_type
+        self._gamma = gamma
+        self._momentum = momentum
+        self._weight_decay = weight_decay
+        self._manual_seed = manual_seed
+        self._deterministic = deterministic
+        self._cache_datasets = cache_datasets
+        self._logs_dir = logs_dir
+        self._verbose = verbose
+        self._kwargs = kwargs
+        self._quantizable_layers = self.get_analyzer().get_number_of_quantizable_layers(arch=self._arch)
+
+    def get_configuration(self) -> Dict[str, Any]:
+        """
+        Retrieves the current configuration settings for the NSGA algorithm and QAT.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing the configuration settings.
+        """
         return {
-            "parent_size": self.parent_size,
-            "offspring_size": self.offspring_size,
-            "batch_size": self.batch_size,
-            "qat_epochs": self.qat_epochs,
-            "approx": self.approx,
-            "activation_quant_wait": self.activation_quant_wait,
-            "per_channel": self.per_channel,
-            "symmetric": self.symmetric,
-            "learning_rate": self.learning_rate,
-            "objectives": self.objectives,
-            "timeloop_heuristic": self.timeloop_heuristic,
-            "timeloop_architecture": self.timeloop_architecture,
-            "base_model": os.path.abspath(self.base_model_path),
-            "model_name": self.model_name,
-            "bn_freeze": self.bn_freeze
-        }
-
-    def get_maximal(self):
-        """Returns maximal values for objectives"""
-        print("Getting maximal values of metrics...")
-
-        results = list(self.get_analyzer().analyze([{"quant_conf": [8 for _ in range(self.quantizable_layers)]}]))[0]
-
-        return {
-            "accuracy": results["accuracy"],
-            "total_edp": results["total_edp"],
-            # "total_cycles": results["total_cycles"]
+            "data": self._data,
+            "dataset_name": self._dataset_name,
+            "pretrained_model": os.path.abspath(self._pretrained_model),
+            "arch": self._arch,
+            "act_function": self._act_function,
+            "pretrained": self._pretrained,
+            "symmetric_quant": self._symmetric_quant,
+            "per_channel_quant": self._per_channel_quant,
+            "workers": self._workers,
+            "train_batch_size": self._train_batch,
+            "test_batch_size": self._test_batch,
+            "parent_size": self._parent_size,
+            "offspring_size": self._offspring_size,
+            "generations": self._generations,
+            "timeloop_architecture": self._timeloop_architecture,
+            "timeloop_heuristic": self._timeloop_heuristic,
+            "total_valid": self._total_valid,
+            "primary_metric": self._primary_metric,
+            "secondary_metric": self._secondary_metric,
+            "previous_run": self._previous_run,
+            "qat_epochs": self._qat_epochs,
+            "lr": self._lr,
+            "lr_type": self._lr_type,
+            "gamma": self._gamma,
+            "momentum": self._momentum,
+            "weight_decay": self._weight_decay,
+            "manual_seed": self._manual_seed,
+            "deterministic": self._deterministic,
+            "cache_datasets": self._cache_datasets,
+            "logs_dir": self._logs_dir,
+            "verbose": self._verbose,
+            **self._kwargs
         }
 
     def init_analyzer(self) -> NSGAAnalyzer:
         """
-        Init NSGAAnalyzer
-        :return: new instance of NSGAAnalyzer
-        """
-        # logs_dir_pattern = os.path.join(self.logs_dir, "logs/%s")
-        logs_dir_pattern = None
-        checkpoints_dir_pattern = os.path.join(self.logs_dir, "checkpoints/%s")
-        return QATAnalyzer(base_model_path=self.base_model_path, batch_size=self.batch_size, qat_epochs=self.qat_epochs,
-                           learning_rate=self.learning_rate,
-                           cache_datasets=self.cache_datasets, approx=self.approx,
-                           activation_quant_wait=self.activation_quant_wait, per_channel=self.per_channel,
-                           symmetric=self.symmetric, logs_dir_pattern=logs_dir_pattern,
-                           checkpoints_dir_pattern=checkpoints_dir_pattern, timeloop_heuristic=self.timeloop_heuristic,
-                           timeloop_architecture=self.timeloop_architecture, model_name=self.model_name,
-                           bn_freeze=self.bn_freeze)
+        Initializes a new instance of NSGAAnalyzer with the specified parameters.
 
-    def get_init_parents(self):
+        Returns:
+            NSGAAnalyzer: New instance of NSGAAnalyzer.
         """
-        Initialize initial parents generation
-        :return: List of initial parents
-        """
-        return [{"quant_conf": [i for _ in range(self.quantizable_layers)]} for i in range(2, 9)]
+        checkpoints_dir_pattern = os.path.join(self._logs_dir, "checkpoints/%s")
+        return QATAnalyzer(model_name=self._arch, pretrained_model=self._pretrained_model, act_function=self._act_function, data=self._data, dataset_name=self._dataset_name, train_batch=self._train_batch, test_batch=self._test_batch, workers=self._workers, qat_epochs=self._qat_epochs, lr=self._lr, lr_type=self._lr_type, gamma=self._gamma, momentum=self._momentum, weight_decay=self._weight_decay, manual_seed=self._manual_seed, deterministic=self._deterministic, cache_datasets=self._cache_datasets, symmetric_quant=self._symmetric_quant, per_channel_quant=self._per_channel_quant, checkpoints_dir_pattern=checkpoints_dir_pattern, timeloop_heuristic=self._timeloop_heuristic, timeloop_architecture=self._timeloop_architecture, primary_metric=self._primary_metric, secondary_metric=self._secondary_metric, total_valid=self._total_valid, verbose=self._verbose)
 
-    def crossover(self, parents):
+    def get_maximal(self) -> Dict[str, float]:
         """
-        Create offspring from parents using uniform crossover and 10 % mutation chance
-        :param parents: List of parents
-        :return: created offspring
+        Determines the maximal values for the objectives, particularly accuracy and the primary metric.
+
+        Returns:
+            Dict[str, float]: A dictionary with keys as 'accuracy' and the primary metric, and their maximal values.
         """
-        child_conf = [8 for _ in range(self.quantizable_layers)]
-        for li in range(self.quantizable_layers):
-            if random.random() < 0.95:  # 95 % probability of crossover
+        print("Getting maximal values of metrics...")
+        max_quant_config = {i: {"Inputs": 8, "Weights": 8} for i in range(self._quantizable_layers)}
+        results = list(self.get_analyzer().analyze([{"quant_conf": max_quant_config}]))[0]
+
+        return {
+            "accuracy": results["accuracy"],
+            f"total_{self._primary_metric}": results[f"total_{self._primary_metric}"],
+        }
+
+    def get_init_parents(self) -> List[Dict[str, Dict[int, Dict[str, int]]]]:
+        """
+        Generates an initial set of parents for the NSGA-II algorithm.
+
+        Returns:
+            List[Dict[str, Dict[int, Dict[str, int]]]]: A list of parent configurations for the initial population.
+        """
+        initial_parents = []
+        for bitwidth in range(2, 9):
+            uniform_quant_config = {i: {"Inputs": bitwidth, "Weights": bitwidth} for i in range(self._quantizable_layers)}
+            initial_parents.append({"quant_conf": uniform_quant_config})
+        return initial_parents
+
+    def crossover(self, parents: List[Dict[str, Dict[int, Dict[str, int]]]]) -> Dict[str, Dict[int, Dict[str, int]]]:
+        """
+        Performs crossover and mutation to create new offspring from given parents.
+
+        Args:
+            parents: A list of parent configurations.
+
+        Returns:
+            Dict[str, Dict[int, Dict[str, int]]]: A single offspring configuration resulting from crossover and mutation.
+        """
+        child_conf = OrderedDict()
+        for li in range(self._quantizable_layers):
+            if random.random() < 0.95:  # 95% probability of crossover
                 child_conf[li] = random.choice(parents)["quant_conf"][li]
-            else:  # 5 % change to use 8-bit quantization
-                child_conf[li] = 8
+            else:  # 5% chance to use 8-bit quantization
+                child_conf[li] = {"Inputs": 8, "Weights": 8}
 
-        if random.random() < 0.1:  # 10 % probability of mutation
-            li = random.choice([x for x in range(self.quantizable_layers)])
-            child_conf[li] = random.choice([3, 4, 5, 6, 7, 8])
+        if random.random() < 0.1:  # 10% probability of mutation
+            li = random.choice(range(self._quantizable_layers))
+            act_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
+            weight_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
+            child_conf[li] = {"Inputs": act_bw, "Weights": weight_bw}
 
         return {"quant_conf": child_conf}
 
@@ -136,43 +229,87 @@ class QATAnalyzer(NSGAAnalyzer):
     """
     Analyzer for QATNSGA
 
-    This analyzer analyzes individuals by running a few epochs using quantization-aware training
-    and tracking best achieved Top-1 accuracy
+    This analyzer analyzes individuals by running a few epochs using quantization-aware training (QAT)
+    and tracks the best achieved Top-1 accuracy and the value of optimized HW metric
     """
 
-    def __init__(self, base_model_path, batch_size=64, qat_epochs=10, bn_freeze=25, learning_rate=0.05, warmup=0.0,
-                 cache_datasets=False, approx=False, activation_quant_wait=0, per_channel=True, symmetric=True,
-                 logs_dir_pattern=None, checkpoints_dir_pattern=None, timeloop_heuristic="random",
-                 timeloop_architecture="eyeriss", include_timeloop_dump=False, model_name="mobilenet"):
-        self.base_model_path = base_model_path
-        self.batch_size = batch_size
-        self.qat_epochs = qat_epochs
-        self.bn_freeze = bn_freeze
-        self.learning_rate = learning_rate
-        self.warmup = warmup
-        self.cache_datasets = cache_datasets
-        self.approx = approx
-        self.activation_quant_wait = activation_quant_wait
-        self.per_channel = per_channel
-        self.symmetric = symmetric
-        self.logs_dir_pattern = logs_dir_pattern
-        self.checkpoints_dir_pattern = checkpoints_dir_pattern
-        self.timeloop_heuristic = timeloop_heuristic
-        self.timeloop_architecture = timeloop_architecture
-        self.include_timeloop_dump = include_timeloop_dump
-        self.model_name = model_name
-        self._mask = None
+    # Primary metric key mapping  NOTE: ADD MORE HERE IF YOU WISH
+    metric_key_mapping = {
+        "energy": "Energy [uJ]",
+        "delay": "Cycles",
+        "lla": "LastLevelAccesses",
+        "edp": "EDP [J*cycle]"
+    }
+
+    def __init__(self, model_name: str, pretrained_model: str, act_function: str, data: str,
+                 dataset_name: str, train_batch: int, test_batch: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, cache_datasets: bool, symmetric_quant: bool, per_channel_quant: bool, checkpoints_dir_pattern: str, timeloop_heuristic: str, timeloop_architecture: str, primary_metric: str, secondary_metric: str, total_valid: int, verbose: bool):
+        """
+        Initializes a new QATAnalyzer instance with specific configuration settings.
+
+        Args:
+            model_name (str): Name of the model architecture.
+            pretrained_model (str): Path to the pretrained model.
+            act_function (Callable): Activation function used in the model.
+            data (str): Path to the training dataset.
+            dataset_name (str): Name of the dataset.
+            train_batch (int): Training batch size.
+            test_batch (int): Testing batch size.
+            workers (int): Number of data loading workers.
+            qat_epochs (int): Number of epochs for quantization-aware training.
+            lr (float): Learning rate for training.
+            lr_type (str): Type of learning rate scheduler.
+            gamma (float): Learning rate decay factor.
+            momentum (float): Momentum factor for the optimizer.
+            weight_decay (float): Weight decay factor for the optimizer.
+            manual_seed (int): Seed for random number generators for reproducibility.
+            deterministic (bool): Flag to enable deterministic behavior in CUDA operations.
+            cache_datasets (bool): Flag to enable caching of datasets.
+            symmetric_quant (bool): Flag to use symmetric quantization.
+            per_channel_quant (bool): Flag to use per-channel quantization.
+            checkpoints_dir_pattern (Optional[str]): Pattern for the checkpoints directory.
+            timeloop_heuristic (str): Heuristic for the timeloop mapper.
+            timeloop_architecture (str): Architecture for the timeloop mapper.
+            primary_metric (str): Primary metric for model evaluation.
+            secondary_metric (Optional[str]): Secondary metric for model evaluation.
+            total_valid (int): Total valid mappings to consider in timeloop mapper.
+            verbose (bool): Flag to enable verbose logging.
+        """
+        self._model_name = model_name
+        self._pretrained_model = pretrained_model
+        self._act_function = act_function
+        self._data = data
+        self._dataset_name = dataset_name
+        self._train_batch_size = train_batch
+        self._test_batch_size = test_batch
+        self._workers = workers
+        self._qat_epochs = qat_epochs
+        self._lr = lr
+        self._lr_type = lr_type
+        self._gamma = gamma
+        self._momentum = momentum
+        self._weight_decay = weight_decay
+        self._manual_seed = manual_seed
+        self._deterministic = deterministic
+        self._cache_datasets = cache_datasets
+        self._symmetric_quant = symmetric_quant
+        self._per_channel_quant = per_channel_quant
+        self._checkpoints_dir_pattern = checkpoints_dir_pattern
+        self._timeloop_heuristic = timeloop_heuristic
+        self._timeloop_architecture = timeloop_architecture
+        self._primary_metric = primary_metric
+        self._secondary_metric = secondary_metric
+        self._total_valid = total_valid
+        self._verbose = verbose
 
         self.ensure_cache_folder()
 
+        self._symmetric_asymmetric = "symmetric" if self._symmetric_quant else "asymmetric"
+        self._pertensor_prechannel = "perchannel" if self._per_channel_quant else "pertensor"
         # Current cache file
         i = 0
         while True:
-            self.cache_file = "cache/%s_%d_%d_%d_%.5f_%.2f_%d_%r_%r_%r_%s_%d.json.gz" % (
-                self.model_name, batch_size, qat_epochs, bn_freeze, learning_rate, warmup, activation_quant_wait,
-                approx,
-                per_channel, symmetric, timeloop_heuristic,
-                i)
+            self.cache_file = "nsga_cache/%s_%s_%s_%d_%d_%.5f_%s_%s_%s_%s_%s_%d.json.gz" % (
+                self._model_name, self._act_function, self._dataset_name, self._qat_epochs, self._train_batch_size,  self._lr, self._symmetric_asymmetric, self._pertensor_prechannel, self._primary_metric, self._timeloop_architecture, self._timeloop_heuristic, i)
             if not os.path.isfile(self.cache_file):
                 break
             i += 1
@@ -181,31 +318,81 @@ class QATAnalyzer(NSGAAnalyzer):
         self.cache = []
         self.load_cache()
 
+    def _create_namespace_to_call_train(self) -> argparse.Namespace:
+        """
+        Creates an argparse.Namespace object with values from this QATAnalyzer instance to be used for calling the training script.
+
+        Returns:
+            argparse.Namespace: The namespace object with arguments for training.
+        """
+        # Create a Namespace object with default values
+        args = argparse.Namespace()
+        # Map the instance variables to the namespace arguments
+        # Model options
+        args.pretrained = True if self._pretrained_model != "" else False
+        args.pretrained_model = self._pretrained_model
+        args.arch = self._model_name
+        args.act_function = self._act_function
+        args.qat = True
+        args.symmetric_quant = self._symmetric_quant
+        args.per_channel_quant = self._per_channel_quant
+        args.quant_setting = "non_uniform"
+        # Dataset
+        args.data = self._data
+        args.dataset_name = self._dataset_name
+        args.train_batch = self._train_batch_size
+        args.test_batch = self._test_batch_size
+        args.workers = self._workers
+        # Train options
+        args.epochs = self._qat_epochs
+        args.lr = self._lr
+        args.lr_type = self._lr_type
+        args.gamma = self._gamma
+        args.momentum = self._momentum
+        args.weight_decay = self._weight_decay
+        args.manual_seed = self._manual_seed
+        args.deterministic = self._deterministic
+        args.start_epoch = 0
+        args.freeze_epochs = 0
+        args.warmup_epoch = 0
+        args.resume = False
+        # Device options NOTE potential addition (especially for multigpu support extension)
+        args.gpu_id = "0"
+        # Miscs
+        args.manual_seed = self._manual_seed
+        args.deterministic = self._deterministic
+        args.verbose = self._verbose
+        args.log = True
+        args.wandb = False
+
+        return args
+
     @staticmethod
-    def ensure_cache_folder():
+    def ensure_cache_folder() -> None:
         """
         Ensures cache folder exists
         """
-        if not os.path.exists("cache"):
-            os.makedirs("cache")
+        os.makedirs("nsga_cache", exist_ok=True)
 
-    def load_cache(self):
+    def load_cache(self) -> None:
         """
         Loads all already evaluated individuals from cache files to local cache
         """
-        for fn in glob.glob("cache/%s_%d_%d_%d_%.5f_%.2f_%d_%r_%r_%r_*.json.gz" % (
-                self.model_name, self.batch_size, self.qat_epochs, self.bn_freeze, self.learning_rate, self.warmup,
-                self.activation_quant_wait, self.approx,
-                self.per_channel, self.symmetric)):
+        for fn in glob.glob("nsga_cache/%s_%s_%s_%d_%d_%.5f_%s_%s_%s_%s_%s_*.json.gz" % (
+                self._model_name, self._act_function, self._dataset_name, self._qat_epochs, self._train_batch_size, self._lr, self._symmetric_asymmetric, self._pertensor_prechannel, self._primary_metric, self._timeloop_architecture, self._timeloop_heuristic)):
             print("cache open", fn)
 
             act = json.load(gzip.open(fn))
 
-            # find node in cache
+            # Find node in cache
             for c in act:
                 conf = c["quant_conf"]
 
-                # try to search in cache
+                # Convert keys from strings to integers
+                conf = {int(k): v for k, v in conf.items()}
+                c["quant_conf"] = conf
+
+                # Try to search in cache
                 if not any(filter(lambda x: np.array_equal(x["quant_conf"], conf), self.cache)):
                     self.cache.append(c)
                 else:
@@ -214,26 +401,27 @@ class QATAnalyzer(NSGAAnalyzer):
                         if key not in cached_entry:
                             cached_entry[key] = c[key]
 
-        tf.print("Cache loaded %d" % (len(self.cache)))
+        print("Cache loaded %d" % (len(self.cache)))
 
-    def analyze(self, quant_configuration_set):
+    def analyze(self, quant_configuration_set: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Analyze configurations
-        :param quant_configuration_set: List of configurations for evaluation
-        :return: Analyzer list of configurations
+        Analyze configurations.
+
+        Args:
+            quant_configuration_set (List[Dict[str, Any]]): List of configurations for evaluation.
+
+        Returns:
+            List[Dict[str, Any]]: Analyzer list of configurations.
         """
-
-        # TODO: Bad cache implementation
-        if True:
-            raise Exception("Use multigpu option")
-
         for node_conf in quant_configuration_set:
             quant_conf = node_conf["quant_conf"]
 
-            # try to search in cache
+            start_total = time.time()
+            train_time = 0
+            timeloop_time = 0
+            # Try to search in cache
             cache_sel = self.cache.copy()
-
-            # filter data
+            # Filter data
             for i in range(len(quant_conf)):
                 cache_sel = filter(lambda x: x["quant_conf"][i] == quant_conf[i], cache_sel)
                 cache_sel = list(cache_sel)
@@ -241,170 +429,135 @@ class QATAnalyzer(NSGAAnalyzer):
             # Get the accuracy
             if len(cache_sel) >= 1:  # Found in cache
                 accuracy = cache_sel[0]["accuracy"]
-                total_edp = cache_sel[0][f"total_edp_{self.timeloop_architecture}"]
-                # total_cycles = cache_sel[0]["total_cycles"]
-                tf.print("Cache : %s;accuracy=%s;edp=%s;" % (
-                    str(quant_conf), accuracy, total_edp))
+                total_metric = cache_sel[0][f"total_{self._primary_metric}"]
+                print(f"Cache: %s;accuracy=%s;{self._primary_metric}=%s;" % (
+                    str(quant_conf), accuracy, total_metric))
             else:  # Not found in cache
-                quantized_model = self.quantize_model_by_config(quant_conf)
-
                 checkpoints_dir = None
-                if self.checkpoints_dir_pattern is not None:
-                    checkpoints_dir = self.checkpoints_dir_pattern % '_'.join(map(lambda x: str(x), quant_conf))
+                if self._checkpoints_dir_pattern is not None:
+                    checkpoints_dir = self._checkpoints_dir_pattern % '_'.join(map(lambda x: str(x), quant_conf))
 
-                logs_dir = None
-                if self.logs_dir_pattern is not None:
-                    logs_dir = self.logs_dir_pattern % '_'.join(map(lambda x: str(x), quant_conf))
+                qat_args = self._create_namespace_to_call_train()
+                qat_args.checkpoint_path = checkpoints_dir
+                qat_args.non_uniform_width = quant_conf
 
-                accuracy = mobilenet_tinyimagenet_qat.main(q_aware_model=quantized_model,
-                                                           epochs=self.qat_epochs,
-                                                           eval_epochs=50,
-                                                           bn_freeze=self.bn_freeze,
-                                                           batch_size=self.batch_size,
-                                                           learning_rate=self.learning_rate,
-                                                           warmup=self.warmup,
-                                                           checkpoints_dir=checkpoints_dir,
-                                                           logs_dir=logs_dir,
-                                                           cache_dataset=self.cache_datasets,
-                                                           from_checkpoint=None,
-                                                           verbose=False,
-                                                           activation_quant_wait=self.activation_quant_wait,
-                                                           save_best_only=True
-                                                           )
+                start_train = time.time()
+                accuracy = train.main(qat_args)
+                train_time = time.time() - start_train
 
-                # calculate size
-                mapper_facade = MapperFacade(architecture=self.timeloop_architecture)
-                total_valid = 0 if self.timeloop_heuristic == "exhaustive" else 30000
-                hardware_params = mapper_facade.get_hw_params_parse_model(model=self.base_model_path, batch_size=1,
-                                                                          bitwidths=get_config_from_model(
-                                                                              quantized_model),
-                                                                          input_size="224,224,3", threads=24,
-                                                                          heuristic=self.timeloop_heuristic,
-                                                                          metrics=("edp", ""), verbose=True,
-                                                                          total_valid=total_valid)
-                total_edp = sum(map(lambda x: x["EDP [J*cycle]"], hardware_params.values()))
-                # total_cycles = sum(map(lambda x: x["Cycles"], hardware_params.values()))
+                # Retrieve HW metrics
+                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture)
+                # Determine num_classes and input_size based on dataset_name
+                if self._dataset_name == "imagenet":
+                    in_size = "224,224,3"
+                    num_classes = 1000
+                elif self._dataset_name == "imagenet100":
+                    in_size = "224,224,3"
+                    num_classes = 100
+                elif self._dataset_name == "cifar10":
+                    in_size = "32,32,3"
+                    num_classes = 10
+                else:
+                    raise ValueError(f"Unknown dataset_name: {self._dataset_name}. Add support for it here.")
 
+                start_timeloop = time.time()
+                if self._pretrained_model != "":
+                    hardware_params = mapper_facade.get_hw_params_parse_model(model=self._pretrained_model,
+                                                                              arch=self._model_name,
+                                                                              batch_size=1,  # search the space for batch size if just 1..
+                                                                              bitwidths=self.transform_to_timeloop_quant_config(quant_conf),
+                                                                              input_size=in_size,
+                                                                              threads=8,
+                                                                              heuristic=self._timeloop_heuristic,
+                                                                              metrics=(self._primary_metric, self._secondary_metric),
+                                                                              total_valid=self._total_valid,
+                                                                              cache_dir="nsga_experiments_caches",
+                                                                              cache_name=f"{self._timeloop_architecture}_{self._model_name}_{self._dataset_name}_cache",
+                                                                              verbose=self._verbose
+                                                                              )
+                else:
+                    hardware_params = mapper_facade.get_hw_params_create_model(model=self._model_name,
+                                                                               num_classes=num_classes,
+                                                                               batch_size=1,  # search the space for batch size if just 1..
+                                                                               bitwidths=self.transform_to_timeloop_quant_config(quant_conf),
+                                                                               input_size=in_size,
+                                                                               threads=8,
+                                                                               heuristic=self._timeloop_heuristic,
+                                                                               metrics=(self._primary_metric, self._secondary_metric),
+                                                                               total_valid=self._total_valid,
+                                                                               cache_dir="nsga_experiments_caches",
+                                                                               cache_name=f"{self._timeloop_architecture}_{self._model_name}_{self._dataset_name}_cache",
+                                                                               verbose=self._verbose
+                                                                               )
+                timeloop_time = time.time() - start_timeloop
+                total_metric = sum(map(lambda x: float(x[QATAnalyzer.metric_key_mapping[self._primary_metric]]), hardware_params.values()))
+            total_time = time.time() - start_total
             # Create output node
             node = node_conf.copy()
             node["quant_conf"] = quant_conf
             node["accuracy"] = float(accuracy)
-            node["total_edp"] = float(total_edp)
-            # node["total_cycles"] = int(total_cycles)
+            node[f"total_{self._primary_metric}"] = float(total_metric)
+            # Add timing information
+            node["total_time"] = total_time
+            node["train_time"] = train_time
+            node["timeloop_time"] = timeloop_time
 
             if len(cache_sel) == 0:  # If the data are not from the cache, cache it
                 self.cache.append(node)
-                json.dump(self.cache, gzip.open(self.cache_file, "wt", encoding="utf8"))
+                json.dump(self.cache, gzip.open(self.cache_file, "wt", encoding="utf8"), indent=2, cls=JSONEncoder)
 
             yield node
 
     def __str__(self):
         return "cache (file: %s, size: %d)" % (self.cache_file, len(self.cache))
 
-    def apply_mask(self, chromosome):
+    def get_number_of_quantizable_layers(self, arch: str) -> int:
         """
-        Takes chromosome and maps it to configuration for all layers
-        :param chromosome: Chromosome
-        :return: List of quantization configuration for all layers
+        Get the number of quantizable layers in a given model architecture.
+
+        Args:
+            arch (str): The name of the model architecture.
+
+        Returns:
+            int: Number of quantizable layers in the model.
         """
-        quant_config = chromosome.copy()
-        quant_config.append(8)
-        final_quant_config = [quant_config[i] for i in self.mask]
-        config = [
-            {
-                "weight_bits": final_quant_config[i],
-                "activation_bits": 8
-            } for i in range(len(self.mask))
-        ]
-        return config
+        # Instantiate the model based on the provided architecture name
+        assert arch in models.__dict__, f"Unknown model architecture: {arch}"
+        tmp_model = models.__dict__[arch]()
 
-    def quantize_model_by_config(self, quant_config):
-        config = self.apply_mask(quant_config)
-        base_model = keras.models.load_model(self.base_model_path)
-        return quantize_model(base_model, config, approx=self.approx, per_channel=self.per_channel,
-                              symmetric=self.symmetric)
+        # Count quantizable layers (e.g., layers with weights)
+        quantizable_layers = 0
+        for tmp_module in tmp_model.modules():
+            if isinstance(tmp_module, (torch.nn.Conv2d, torch.nn.Linear)):
+                quantizable_layers += 1
 
-    def get_number_of_quantizable_layers(self):
+        self._quantizable_layers = quantizable_layers
+        return quantizable_layers
+
+    @staticmethod
+    def transform_to_timeloop_quant_config(quant_conf: OrderedDict) -> Dict[int, Dict[str, int]]:
         """
-        Get number of quantizable layers (layers which have some weights to quantize)
-        :return: Number of quantizable layers
+        Transforms the quantization configuration for each layer to include the number of output bits.
+
+        Args:
+            quant_conf (OrderedDict): An ordered dictionary with layer numbers as keys and configurations as values.
+
+        Returns:
+            Dict[int, Dict[str, int]]: A transformed configuration dictionary where each layer includes the number of bits for inputs, weights, and outputs.
         """
-        return len(list(filter(lambda x: x != -1, self.mask)))
+        transformed_config = {}
+        layers = list(quant_conf.keys())
 
-    @property
-    def mask(self):
-        if self._mask is None:
-            self._mask = self._get_quantizable_layers_mask()
-        return self._mask
+        for i, layer in enumerate(layers):
+            config = quant_conf[layer]
+            if i < len(layers) - 1:  # If not the last layer
+                next_layer_input = quant_conf[layers[i + 1]]["Inputs"]
+            else:
+                next_layer_input = 8  # Default for the last layer
 
-    def _get_quantizable_layers_mask(self):
-        """
-        Create mask that maps chromosome to all layers configuration
-        :return: created mask
-        """
-        base_model = keras.models.load_model(self.base_model_path)
-        transformer = PerLayerQuantizeModelTransformer(base_model, [], {}, approx=self.approx,
-                                                       per_channel=self.per_channel, symmetric=self.symmetric)
-
-        groups = transformer.get_quantizable_layers_groups()
-        mask = [-1 for _ in range(len(groups))]
-        count = 0
-        for i, group in enumerate(groups):
-            if calculate_model_size.calculate_weights_mobilenet_size(base_model, only_layers=group,
-                                                                     per_channel=self.per_channel,
-                                                                     symmetric=self.symmetric) > 0:
-                mask[i] = count
-                count = count + 1
-        return mask
-
-
-def get_config_from_model(quantized_model):
-    layers = OrderedDict()  # Layers with number of their weights
-    for layer in quantized_model.layers:
-        if (
-                isinstance(layer, QuantFusedConv2DBatchNormalizationLayer) or
-                isinstance(layer, ApproxQuantFusedConv2DBatchNormalizationLayer)
-        ):
-            layers[layer.name] = {
-                "Inputs": 8,
-                "Weights": layer.quantize_num_bits_weight,
-                "Outputs": 8
+            transformed_config[layer] = {
+                "Inputs": config["Inputs"],
+                "Weights": config["Weights"],
+                "Outputs": next_layer_input
             }
-        elif (
-                isinstance(layer, QuantFusedDepthwiseConv2DBatchNormalizationLayer) or
-                isinstance(layer, ApproxQuantFusedDepthwiseConv2DBatchNormalizationLayer)
-        ):
-            layers[layer.name] = {
-                "Inputs": 8,
-                "Weights": layer.quantize_num_bits_weight,
-                "Outputs": 8
-            }
-        elif isinstance(layer, QuantizeWrapperV2):
-            num_bits_weight = 8
-            if "num_bits_weight" in layer.quantize_config.get_config():
-                num_bits_weight = layer.quantize_config.get_config()["num_bits_weight"]
-            if isinstance(layer.layer, keras.layers.Conv2D):
-                layers[layer.layer.name] = {
-                    "Inputs": 8,
-                    "Weights": num_bits_weight,
-                    "Outputs": 8
-                }
-            elif isinstance(layer.layer, keras.layers.DepthwiseConv2D):
-                layers[layer.layer.name] = {
-                    "Inputs": 8,
-                    "Weights": num_bits_weight,
-                    "Outputs": 8
-                }
-        elif isinstance(layer, keras.layers.Conv2D):
-            layers[layer.name] = {
-                "Inputs": 8,
-                "Weights": 8,
-                "Outputs": 8
-            }
-        elif isinstance(layer, keras.layers.DepthwiseConv2D):
-            layers[layer.name] = {
-                "Inputs": 8,
-                "Weights": 8,
-                "Outputs": 8
-            }
-    return layers
+        return transformed_config
