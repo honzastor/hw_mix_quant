@@ -3,9 +3,9 @@ python3 -W ignore src/run_nsga.py                           \
  --pretrained_model mnv1_cifar10_100E_model_best.pth.tar    \
  --arch mobilenetv1                                         \
  --act_function relu                                        \
- --data src/pytorch/data/datasets/cifar10                   \
  --cache_directory nsga_experiments_caches                  \
  --cache_name eyeriss_mobilenetv1_cifar10_cache             \
+ --data src/pytorch/data/datasets/cifar10                   \
  --dataset_name cifar10                                     \
  --workers 4                                                \
  --train_batch 256                                          \
@@ -20,8 +20,7 @@ python3 -W ignore src/run_nsga.py                           \
  --timeloop_architecture eyeriss                            \
  --timeloop_heuristic random                                \
  --total_valid 100                                          \
- --primary_metric memsize_words                             \
+ --primary_metric edp                                       \
  --manual_seed 42                                           \
- --logs_dir logs_nsga_qat                                   \
- 
-
+ --logs_dir logs_nsga_qat_multigpu                          \
+ --multigpu                                                 \

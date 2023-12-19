@@ -371,11 +371,13 @@ class MapperFacade:
     Args:
         configs_rel_path (str): Relative path to the timeloop configs folder.
         architecture (str): Name of the architecture to be used along with its associated components and constraints.
+        run_id (str): The ID of the run to distinguish cache used for writing.
     """
-    def __init__(self, configs_rel_path: str = "timeloop_utils/timeloop_configs", architecture: str = "eyeriss") -> None:
+    def __init__(self, configs_rel_path: str = "timeloop_utils/timeloop_configs", architecture: str = "eyeriss", run_id="1") -> None:
         self._architecture = architecture
         self._mode = f"timeloop-mapper"
         self._thread_id = threading.get_ident()
+        self._run_id = run_id
 
         # Get the absolute directory of this script
         self._DIR_PATH = os.path.dirname(os.path.abspath(__file__))
@@ -413,7 +415,7 @@ class MapperFacade:
 
         with gzip.open(cache_file_path, 'wt') as file:
             json.dump(cache, file, indent=2, cls=JSONEncoder)
-            
+
     def _modify_mapper_configs(self, mapper_config: Dict[str, Any], heuristic: str, metrics: Tuple[str, str], threads: Union[str, int], total_valid: int, log_all: bool) -> Dict[str, Any]:
         """
         Modifies the mapper configuration based on specified settings.
@@ -477,7 +479,7 @@ class MapperFacade:
             batch_size (int): The batch size to use. Defaults to 1.
             threads (Union[str, int]): The number of threads to use, or 'all' for all available threads. Defaults to "all".
             heuristic (str): The heuristic type to use ('exhaustive', 'hybrid', 'linear', 'random'). Defaults to "random".
-            metrics (Tuple[str, str]): A tuple of metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp`, leaving the second metric blank. Defaults to ("edp", "").            
+            metrics (Tuple[str, str]): A tuple of metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp` and eight option `memsize_words`, leaving the second metric blank. Defaults to ("edp", "").
             total_valid (int): The number of total valid mappings to consider across all available mapper threads. A value of 0 means that this criteria is not used for thread termination. Defaults to 0.
             out_dir (str): Relative path to the directory to store timeloop-mapper output files. Defaults to "tmp_outputs".
             cache_dir (str): Relative path to the cache directory where the timeloop-mapper cache file is stored. Defaults to "timeloop_mapper_cache".
@@ -491,16 +493,29 @@ class MapperFacade:
         """
         mapper = f"{self.configs_path}/mapper_heuristics/mapper_template.yaml"
 
-        cache_file_path = os.path.join(cache_dir, f"{cache_name}.json.gz")
+        cache_file_path = os.path.join(cache_dir, f"{cache_name}_{self._run_id}.json.gz")
         cache = self._load_cache(cache_file_path)
         layer = workload.split("/")[-1].split(".")[0]
 
+        all_caches = []
+        for cache_file in glob.glob(os.path.join(cache_dir, f"{cache_name}_*.json.gz")):
+            c = self._load_cache(cache_file)
+            all_caches.append(c)
+
+        # Look into local cache first
         if layer in cache:
             if bitwidth in cache[layer]:
                 # Return dictionary with the best found HW params and total mapper runtime from cache
                 return cache[layer][bitwidth]
         else:
             cache[layer] = {}  # Initialize cache[layer] as a dictionary
+
+        # Look into all caches
+        for c in all_caches:
+            if layer in c:
+                if bitwidth in c[layer]:
+                    # Return dictionary with the best found HW params and total mapper runtime from cache
+                    return c[layer][bitwidth]
 
         with open(mapper, "r") as map:
             try:
@@ -560,7 +575,7 @@ class MapperFacade:
         runtime = end_time - start_time
         threads = threads if threads != "all" else multiprocessing.cpu_count()
 
-        cache[layer][bitwidth] = {"Mode": self._mode, "HW": self._architecture, "Workload": layer, "Bitwidths": bitwidth, "Batch_size": batch_size, "Mapper heuristic": heuristic, "Total valid": total_valid, "Threads": threads, "Optimized_metric_1": metrics[0], "Optimized_metric_2": metrics[1], **result_dict, "Runtime [s]": "{:.2f}".format(runtime)}
+        cache[layer][bitwidth] = {"Mode": self._mode, "HW": self._architecture, "Workload": layer, "Bitwidths": bitwidth, "Batch_size": batch_size, "Mapper heuristic": heuristic, "Total valid": total_valid, "Threads": threads, "Optimized_metric_1": metrics[0], "Optimized_metric_2": metrics[1], **result_dict, "Run_ID": self._run_id, "Runtime [s]": "{:.2f}".format(runtime)}
         self._save_cache(cache, cache_file_path)
 
         # Return dictionary with the best found HW params and total mapper runtime
@@ -576,7 +591,7 @@ class MapperFacade:
             bitwidths (Optional[Union[Tuple[int, int, int], Dict[str, Dict[str, int]]]]): The bitwidth settings for the model's workloads. Can be None for native settings, a tuple (i.e. (8,4,8) for uniform settings across layers, or a dictionary for non-uniform settings per layer (for example: `{"layer_1": {"Inputs": 8, "Weights": 4, "Outputs": 6},"layer_2": {"Inputs": 6, "Weights": 2, "Outputs": 5}}`). Defaults to None.
             threads (Union[str, int]): The number of threads to use for the mapper heuristics, or 'all' for all available threads. Defaults to "all".
             heuristic (str): The heuristic type to use for the mapper. Choices are `exhaustive`, `hybrid`, `linear` or `random`. Defaults to "random".
-            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp`, leaving the second metric blank. Defaults to ("edp", "").
+            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp` and eight option `memsize_words`, leaving the second metric blank. Defaults to ("edp", "").
             total_valid (int): The number of total valid mappings to consider across all available mapper threads. A value of 0 means that this criteria is not used for thread termination. Defaults to 0.
             out_dir (str): Relative path to the output directory for the timeloop-mapper's output files. Defaults to "tmp_outputs".
             cache_dir (str): Relative path to the cache directory where the timeloop-mapper cache file is stored. Defaults to "timeloop_mapper_cache".
@@ -618,7 +633,7 @@ class MapperFacade:
             input_size (str): Input size of the model. Defaults to "224,224,3".
             threads (Union[str, int]): The number of threads to use for the mapper heuristics, or 'all' for all available threads. Defaults to "all".
             heuristic (str): The heuristic type to use for the mapper. Choices are `exhaustive`, `hybrid`, `linear` or `random`. Defaults to "random".
-            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp`, leaving the second metric blank. Defaults to ("edp", "").
+            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp` and eight option `memsize_words`, leaving the second metric blank. Defaults to ("edp", "").
             total_valid (int): The number of total valid mappings to consider across all available mapper threads. A value of 0 means that this criteria is not used for thread termination. Defaults to 0.
             out_dir (str): Relative path to the output directory for the timeloop-mapper's output files. Defaults to "tmp_outputs".
             cache_dir (str): Relative path to the cache directory where the timeloop-mapper cache file is stored. Defaults to "timeloop_mapper_cache".
@@ -651,6 +666,8 @@ class MapperFacade:
             sys.exit(0)
 
         # Run timeloop-mapper on the created workloads
+        if "memsize_words" in metrics:  # The memsize_words is an artificial setting.. it merely serves for QAT guidance
+            metrics = ("edp", "")
         results = self.run_all_workloads(workloads=workloads_location, batch_size=batch_size, bitwidths=bitwidths, threads=threads, heuristic=heuristic, metrics=metrics, total_valid=total_valid, out_dir=out_dir, cache_dir=cache_dir, cache_name=cache_name, log_all=log_all, verbose=verbose, clean=clean)
         # Clean up created workload_shapes files
         if clean:
@@ -669,7 +686,7 @@ class MapperFacade:
             input_size (str): Input size of the model. Defaults to "224,224,3".
             threads (Union[str, int]): The number of threads to use for the mapper heuristics, or 'all' for all available threads. Defaults to "all".
             heuristic (str): The heuristic type to use for the mapper. Choices are `exhaustive`, `hybrid`, `linear` or `random`. Defaults to "random".
-            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp`, leaving the second metric blank. Defaults to ("edp", "").
+            metrics (Tuple[str, str]): A tuple of two metrics to optimize for. Possible values are all six combinations of `energy`, `delay`, `lla` with an additional seventh option `edp` and eight option `memsize_words`, leaving the second metric blank. Defaults to ("edp", "").
             total_valid (int): The number of total valid mappings to consider across all available mapper threads. A value of 0 means that this criteria is not used for thread termination. Defaults to 0.
             out_dir (str): Relative path to the output directory for the timeloop-mapper's output files. Defaults to "tmp_outputs".
             cache_dir (str): Relative path to the cache directory where the timeloop-mapper cache file is stored. Defaults to "timeloop_mapper_cache".
@@ -693,7 +710,7 @@ class MapperFacade:
 
         assert model_ext in ["pth", "pt", "pth.tar", "pt.tar"], "Unrecognized model file extension. Expected .pt, .pth, .pt.tar or .pth.tar for PyTorch model."
 
-        # Create templates for individual model's CONV layers        
+        # Create templates for individual model's CONV layers
         parse_pytorch_model(model_file=model, input_size=input_size, batch_size=batch_size, out_dir=os.path.join(self._DIR_PATH, "timeloop_utils/construct_workloads/parsed_models"), out_file=model.split("/")[-1].split(".")[0], architecture=arch, verbose=verbose)
 
         # Construct timeloop workloads from the created templates and add to them the bitwidth settings
@@ -712,6 +729,8 @@ class MapperFacade:
             sys.exit(0)
 
         # Run timeloop-mapper on the created workloads
+        if "memsize_words" in metrics:  # The memsize_words is an artificial setting.. it merely serves for QAT guidance
+            metrics = ("edp", "")
         results = self.run_all_workloads(workloads=workloads_location, batch_size=batch_size, bitwidths=bitwidths, threads=threads, heuristic=heuristic, metrics=metrics, total_valid=total_valid, out_dir=out_dir, cache_dir=cache_dir, cache_name=cache_name, log_all=log_all, verbose=verbose, clean=clean)
         # Clean up created workload_shapes files
         if clean:

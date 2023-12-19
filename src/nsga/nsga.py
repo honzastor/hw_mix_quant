@@ -113,8 +113,16 @@ class NSGAState:
         """
         print("# loading %s" % run_file)
         pr = json.load(gzip.open(run_file))
-        parents = pr["parent"]
-        offsprings = pr["offspring"]
+        # Convert keys for parents
+        parents = [
+            {**parent, 'quant_conf': {int(k): v for k, v in parent['quant_conf'].items()}}
+            for parent in pr["parent"]
+        ]
+        offsprings = [
+            {**offspring, 'quant_conf': {int(k): v for k, v in offspring['quant_conf'].items()}}
+            for offspring in pr["offspring"]
+        ]
+
         generation = int(re.match(r".*run\.(\d+).json.gz", run_file).group(1))
         print(f"Restored generation {generation} with {len(parents)} parents and {len(offsprings)} offsprings")
         res_state = cls(generation=generation, parents=parents, offsprings=offsprings)

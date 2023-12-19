@@ -13,7 +13,7 @@ import copy
 import torch
 import torchvision.models as models
 from collections import OrderedDict
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Generator
 
 from .nsga import NSGA, NSGAAnalyzer
 from pytorch import train
@@ -41,11 +41,11 @@ for name in custom_models.__dict__:
 
 class QATNSGA(NSGA):
     """
-    NSGA-II for proposed framework, it uses QAT Analyzer for evaluation of individuals
+    NSGA-II for proposed framework, it uses QAT Analyzer for evaluation of individuals.
     """
 
     def __init__(self, data: str, dataset_name: str, pretrained_model: str, arch: str = "mobilenetv1", pretrained: bool = False,
-                 act_function: str = "relu", symmetric_quant: bool = False, per_channel_quant: bool = False, workers: int = 4, train_batch: int = 256, test_batch: int = 512, generations: int = 25, parent_size: int = 10, offspring_size: int = 10, timeloop_architecture: str = "eyeriss", timeloop_heuristic: str = "random", total_valid: int = 0, primary_metric: str = "edp", secondary_metric: Optional[str] = "", previous_run: Optional[str] = None, qat_epochs: int = 10, lr: float = 0.1, lr_type: str = "cos", gamma: float = 0.1, momentum: float = 0.9, weight_decay: float = 1e-5, manual_seed: int = 42, deterministic: bool = False, cache_datasets: bool = False, logs_dir: str = "/tmp/run" + datetime.datetime.now().strftime("-%Y%m%d-%H%M"), verbose: bool = False, **kwargs):
+                 act_function: str = "relu", symmetric_quant: bool = False, per_channel_quant: bool = False, workers: int = 4, train_batch: int = 256, test_batch: int = 512, generations: int = 25, parent_size: int = 10, offspring_size: int = 10, timeloop_architecture: str = "eyeriss", timeloop_heuristic: str = "random", total_valid: int = 0, primary_metric: str = "edp", secondary_metric: Optional[str] = "", cache_directory: str = "timeloop_caches", cache_name: str = "cache", run_id: str = "1", previous_run: Optional[str] = None, qat_epochs: int = 10, lr: float = 0.1, lr_type: str = "cos", gamma: float = 0.1, momentum: float = 0.9, weight_decay: float = 1e-5, manual_seed: int = 42, deterministic: bool = False, logs_dir: str = "/tmp/run" + datetime.datetime.now().strftime("-%Y%m%d-%H%M"), verbose: bool = False, **kwargs):
         """
         Initialize the class with various parameters for QAT and NSGA-II algorithm.
 
@@ -69,6 +69,9 @@ class QATNSGA(NSGA):
             total_valid (int): Number of total valid mappings in timeloop. Defaults to 0.
             primary_metric (str): Primary metric for timeloop optimization. Defaults to "edp".
             secondary_metric (Optional[str]): Secondary metric for timeloop optimization. Defaults to "".
+            cache_directory (str): Directory to store cache files for hardware metrics estimated by Timeloop. Defaults to "timeloop_caches"
+            cache_name (str): Name of the cache file to store hardware metrics estimated by Timeloop. Defaults to "cache"
+            run_id (str): ID of the current run to distinguish its own cache for writing privileges. Defaults to "1".
             previous_run (Optional[str]): Logs directory of the previous run. None by default.
             qat_epochs (int): Number of epochs for QAT of each individual. Defaults to 10.
             lr (float): Initial learning rate. Defaults to 0.1.
@@ -78,7 +81,6 @@ class QATNSGA(NSGA):
             weight_decay (float): Weight decay for optimizer. Defaults to 1e-5.
             manual_seed (int): Seed for reproducibility. Defaults to 42.
             deterministic (bool): Enable deterministic mode in CUDA. Defaults to False.
-            cache_datasets (bool): Cache datasets during QAT. Defaults to False.
             logs_dir (str): Directory for logging. Defaults to a temporary directory.
             verbose (bool): Enable verbose output. Defaults to False.
         """
@@ -103,6 +105,9 @@ class QATNSGA(NSGA):
         self._total_valid = total_valid
         self._primary_metric = primary_metric
         self._secondary_metric = secondary_metric
+        self._cache_directory = cache_directory
+        self._cache_name = cache_name
+        self._run_id = run_id
         self._previous_run = previous_run
         self._qat_epochs = qat_epochs
         self._lr = lr
@@ -112,7 +117,6 @@ class QATNSGA(NSGA):
         self._weight_decay = weight_decay
         self._manual_seed = manual_seed
         self._deterministic = deterministic
-        self._cache_datasets = cache_datasets
         self._logs_dir = logs_dir
         self._verbose = verbose
         self._kwargs = kwargs
@@ -145,6 +149,9 @@ class QATNSGA(NSGA):
             "total_valid": self._total_valid,
             "primary_metric": self._primary_metric,
             "secondary_metric": self._secondary_metric,
+            "cache_directory": self._cache_directory,
+            "cache_name": self._cache_name,
+            "run_id": self._run_id,
             "previous_run": self._previous_run,
             "qat_epochs": self._qat_epochs,
             "lr": self._lr,
@@ -154,21 +161,21 @@ class QATNSGA(NSGA):
             "weight_decay": self._weight_decay,
             "manual_seed": self._manual_seed,
             "deterministic": self._deterministic,
-            "cache_datasets": self._cache_datasets,
             "logs_dir": self._logs_dir,
             "verbose": self._verbose,
             **self._kwargs
         }
 
-    def init_analyzer(self) -> NSGAAnalyzer:
+    def init_analyzer(self) -> "QATAnalyzer":
         """
-        Initializes a new instance of NSGAAnalyzer with the specified parameters.
+        Initializes a new instance of QATAnalyzer with the specified parameters.
 
         Returns:
-            NSGAAnalyzer: New instance of NSGAAnalyzer.
+            QATAnalyzer: New instance of QATAnalyzer.
         """
         checkpoints_dir_pattern = os.path.join(self._logs_dir, "checkpoints/%s")
-        return QATAnalyzer(model_name=self._arch, pretrained_model=self._pretrained_model, act_function=self._act_function, data=self._data, dataset_name=self._dataset_name, train_batch=self._train_batch, test_batch=self._test_batch, workers=self._workers, qat_epochs=self._qat_epochs, lr=self._lr, lr_type=self._lr_type, gamma=self._gamma, momentum=self._momentum, weight_decay=self._weight_decay, manual_seed=self._manual_seed, deterministic=self._deterministic, cache_datasets=self._cache_datasets, symmetric_quant=self._symmetric_quant, per_channel_quant=self._per_channel_quant, checkpoints_dir_pattern=checkpoints_dir_pattern, timeloop_heuristic=self._timeloop_heuristic, timeloop_architecture=self._timeloop_architecture, primary_metric=self._primary_metric, secondary_metric=self._secondary_metric, total_valid=self._total_valid, verbose=self._verbose)
+        return QATAnalyzer(model_name=self._arch, pretrained_model=self._pretrained_model, act_function=self._act_function,
+                           data=self._data, dataset_name=self._dataset_name, train_batch=self._train_batch, test_batch=self._test_batch, workers=self._workers, cache_directory=self._cache_directory, cache_name=self._cache_name, run_id=self._run_id, qat_epochs=self._qat_epochs, lr=self._lr, lr_type=self._lr_type, gamma=self._gamma, momentum=self._momentum, weight_decay=self._weight_decay, manual_seed=self._manual_seed, deterministic=self._deterministic, symmetric_quant=self._symmetric_quant, per_channel_quant=self._per_channel_quant, checkpoints_dir_pattern=checkpoints_dir_pattern, timeloop_heuristic=self._timeloop_heuristic, timeloop_architecture=self._timeloop_architecture, primary_metric=self._primary_metric, secondary_metric=self._secondary_metric, total_valid=self._total_valid, verbose=self._verbose)
 
     def get_maximal(self) -> Dict[str, float]:
         """
@@ -218,9 +225,13 @@ class QATNSGA(NSGA):
 
         if random.random() < 0.1:  # 10% probability of mutation
             li = random.choice(range(self._quantizable_layers))
-            act_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
-            weight_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
-            child_conf[li] = {"Inputs": act_bw, "Weights": weight_bw}
+            # Decide randomly whether to mutate activations or weights
+            if random.random() < 0.5:  # 50% chance to mutate activations
+                act_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
+                child_conf[li]["Inputs"] = act_bw
+            else:  # 50% chance to mutate weights
+                weight_bw = random.choice([2, 3, 4, 5, 6, 7, 8])
+                child_conf[li]["Weights"] = weight_bw
 
         return {"quant_conf": child_conf}
 
@@ -230,19 +241,23 @@ class QATAnalyzer(NSGAAnalyzer):
     Analyzer for QATNSGA
 
     This analyzer analyzes individuals by running a few epochs using quantization-aware training (QAT)
-    and tracks the best achieved Top-1 accuracy and the value of optimized HW metric
+    and tracks the best achieved Top-1 accuracy and the value of optimized HW metric.
     """
 
-    # Primary metric key mapping  NOTE: ADD MORE HERE IF YOU WISH
-    metric_key_mapping = {
+    # Primary metric key mappings  NOTE: ADD MORE HERE IF YOU WISH
+    float_metric_key_mapping = {
         "energy": "Energy [uJ]",
-        "delay": "Cycles",
-        "lla": "LastLevelAccesses",
         "edp": "EDP [J*cycle]"
     }
 
+    int_metric_key_mapping = {
+        "delay": "Cycles",
+        "lla": "LastLevelAccesses",
+        "memsize_words": "Weights model memory size [Words]"
+    }
+
     def __init__(self, model_name: str, pretrained_model: str, act_function: str, data: str,
-                 dataset_name: str, train_batch: int, test_batch: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, cache_datasets: bool, symmetric_quant: bool, per_channel_quant: bool, checkpoints_dir_pattern: str, timeloop_heuristic: str, timeloop_architecture: str, primary_metric: str, secondary_metric: str, total_valid: int, verbose: bool):
+                 dataset_name: str, train_batch: int, test_batch: int, workers: int, cache_directory: str, cache_name: str, run_id: str, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, symmetric_quant: bool, per_channel_quant: bool, checkpoints_dir_pattern: str, timeloop_heuristic: str, timeloop_architecture: str, primary_metric: str, secondary_metric: str, total_valid: int, verbose: bool):
         """
         Initializes a new QATAnalyzer instance with specific configuration settings.
 
@@ -255,6 +270,9 @@ class QATAnalyzer(NSGAAnalyzer):
             train_batch (int): Training batch size.
             test_batch (int): Testing batch size.
             workers (int): Number of data loading workers.
+            cache_directory (str): Directory to store cache files for hardware metrics estimated by Timeloop.
+            cache_name (str): Name of the cache file to store hardware metrics estimated by Timeloop.
+            run_id (str): ID of the current run to distinguish its own cache for writing privileges. Defaults to "1".
             qat_epochs (int): Number of epochs for quantization-aware training.
             lr (float): Learning rate for training.
             lr_type (str): Type of learning rate scheduler.
@@ -263,7 +281,6 @@ class QATAnalyzer(NSGAAnalyzer):
             weight_decay (float): Weight decay factor for the optimizer.
             manual_seed (int): Seed for random number generators for reproducibility.
             deterministic (bool): Flag to enable deterministic behavior in CUDA operations.
-            cache_datasets (bool): Flag to enable caching of datasets.
             symmetric_quant (bool): Flag to use symmetric quantization.
             per_channel_quant (bool): Flag to use per-channel quantization.
             checkpoints_dir_pattern (Optional[str]): Pattern for the checkpoints directory.
@@ -282,6 +299,9 @@ class QATAnalyzer(NSGAAnalyzer):
         self._train_batch_size = train_batch
         self._test_batch_size = test_batch
         self._workers = workers
+        self._cache_directory = cache_directory
+        self._cache_name = cache_name
+        self._run_id = run_id
         self._qat_epochs = qat_epochs
         self._lr = lr
         self._lr_type = lr_type
@@ -290,7 +310,6 @@ class QATAnalyzer(NSGAAnalyzer):
         self._weight_decay = weight_decay
         self._manual_seed = manual_seed
         self._deterministic = deterministic
-        self._cache_datasets = cache_datasets
         self._symmetric_quant = symmetric_quant
         self._per_channel_quant = per_channel_quant
         self._checkpoints_dir_pattern = checkpoints_dir_pattern
@@ -356,7 +375,7 @@ class QATAnalyzer(NSGAAnalyzer):
         args.freeze_epochs = 0
         args.warmup_epoch = 0
         args.resume = False
-        # Device options NOTE potential addition (especially for multigpu support extension)
+        # Device options NOTE potential change
         args.gpu_id = "0"
         # Miscs
         args.manual_seed = self._manual_seed
@@ -387,10 +406,7 @@ class QATAnalyzer(NSGAAnalyzer):
             # Find node in cache
             for c in act:
                 conf = c["quant_conf"]
-
-                # Convert keys from strings to integers
-                conf = {int(k): v for k, v in conf.items()}
-                c["quant_conf"] = conf
+                c["quant_conf"] = {int(k): v for k, v in conf.items()}
 
                 # Try to search in cache
                 if not any(filter(lambda x: np.array_equal(x["quant_conf"], conf), self.cache)):
@@ -403,15 +419,15 @@ class QATAnalyzer(NSGAAnalyzer):
 
         print("Cache loaded %d" % (len(self.cache)))
 
-    def analyze(self, quant_configuration_set: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def analyze(self, quant_configuration_set: List[Dict[str, Any]]) -> Generator[Dict[str, Any], None, None]:
         """
         Analyze configurations.
 
         Args:
             quant_configuration_set (List[Dict[str, Any]]): List of configurations for evaluation.
 
-        Returns:
-            List[Dict[str, Any]]: Analyzer list of configurations.
+        Yields:
+            Dict[str, Any]: The analyzed configuration with accuracy, hardware parameters, and other relevant metrics.
         """
         for node_conf in quant_configuration_set:
             quant_conf = node_conf["quant_conf"]
@@ -429,8 +445,20 @@ class QATAnalyzer(NSGAAnalyzer):
             # Get the accuracy
             if len(cache_sel) >= 1:  # Found in cache
                 accuracy = cache_sel[0]["accuracy"]
+                optimized_metric = cache_sel[0]["optimized_metric"]
+                total_energy = cache_sel[0]["total_energy"]
+                total_edp = cache_sel[0]["total_edp"]
+                total_delay = cache_sel[0]["total_delay"]
+                total_lla = cache_sel[0]["total_lla"]
+                total_memsize = cache_sel[0]["total_memsize_words"]
+
+                # Add timing information
+                total_time = cache_sel[0]["total_time"]
+                train_time = cache_sel[0]["train_time"]
+                timeloop_time = cache_sel[0]["timeloop_time"]
+
                 total_metric = cache_sel[0][f"total_{self._primary_metric}"]
-                print(f"Cache: %s;accuracy=%s;{self._primary_metric}=%s;" % (
+                print(f"Cache: %s;accuracy=%s;{self._primary_metric}_{self._timeloop_architecture}=%s;" % (
                     str(quant_conf), accuracy, total_metric))
             else:  # Not found in cache
                 checkpoints_dir = None
@@ -446,7 +474,7 @@ class QATAnalyzer(NSGAAnalyzer):
                 train_time = time.time() - start_train
 
                 # Retrieve HW metrics
-                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture)
+                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture, run_id=self._run_id)
                 # Determine num_classes and input_size based on dataset_name
                 if self._dataset_name == "imagenet":
                     in_size = "224,224,3"
@@ -471,8 +499,8 @@ class QATAnalyzer(NSGAAnalyzer):
                                                                               heuristic=self._timeloop_heuristic,
                                                                               metrics=(self._primary_metric, self._secondary_metric),
                                                                               total_valid=self._total_valid,
-                                                                              cache_dir="nsga_experiments_caches",
-                                                                              cache_name=f"{self._timeloop_architecture}_{self._model_name}_{self._dataset_name}_cache",
+                                                                              cache_dir=self._cache_directory,
+                                                                              cache_name=self._cache_name,
                                                                               verbose=self._verbose
                                                                               )
                 else:
@@ -485,18 +513,29 @@ class QATAnalyzer(NSGAAnalyzer):
                                                                                heuristic=self._timeloop_heuristic,
                                                                                metrics=(self._primary_metric, self._secondary_metric),
                                                                                total_valid=self._total_valid,
-                                                                               cache_dir="nsga_experiments_caches",
-                                                                               cache_name=f"{self._timeloop_architecture}_{self._model_name}_{self._dataset_name}_cache",
+                                                                               cache_dir=self._cache_directory,
+                                                                               cache_name=self._cache_name,
                                                                                verbose=self._verbose
                                                                                )
                 timeloop_time = time.time() - start_timeloop
-                total_metric = sum(map(lambda x: float(x[QATAnalyzer.metric_key_mapping[self._primary_metric]]), hardware_params.values()))
+                optimized_metric = self._primary_metric
+                # NOTE add more if needed
+                total_energy = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["energy"]]), hardware_params.values()))
+                total_edp = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
+                total_delay = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
+                total_lla = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
+                total_memsize = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_words"]]), hardware_params.values()))
             total_time = time.time() - start_total
             # Create output node
             node = node_conf.copy()
             node["quant_conf"] = quant_conf
             node["accuracy"] = float(accuracy)
-            node[f"total_{self._primary_metric}"] = float(total_metric)
+            node["optimized_metric"] = optimized_metric
+            node["total_energy"] = total_energy
+            node["total_edp"] = total_edp
+            node["total_delay"] = total_delay
+            node["total_lla"] = total_lla
+            node["total_memsize_words"] = total_memsize
             # Add timing information
             node["total_time"] = total_time
             node["train_time"] = train_time

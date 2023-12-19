@@ -7,6 +7,7 @@ from torchvision import models
 
 import pytorch.models as custom_models
 from nsga.nsga_qat import QATNSGA
+from nsga.nsga_qat_multigpu import MultiGPUQATNSGA
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,8 +76,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--generations", type=int, default=25,
                         help="number of generations for NSGA-II (default: 25)")
     # Checkpoints
-    parser.add_argument('--previous_run', type=str, default=None,
-                        help='logs dir of previous run to continue')
+    parser.add_argument("--previous_run", type=str, default=None,
+                        help="logs dir of previous run to continue")
     # Train options
     parser.add_argument("--qat_epochs", type=int, default=10,
                         help="number of epochs for QAT for each individual (model configuration) during NSGA-II (default: 10)")
@@ -100,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total_valid", type=int, default=0,
                         help="number of total valid mappings to consider across all available mapper threads; "
                         "a value of 0 means that this criteria is not used for thread termination (default: 0)")
-    parser.add_argument("--primary_metric", type=str, default="edp", choices=["energy", "delay", "lla", "edp"],
+    parser.add_argument("--primary_metric", type=str, default="edp", choices=["energy", "delay", "lla", "edp", "memsize_words"],
                         help="primary metric for timeloop-mapper to optimize for; NOTE: this is what NSGA-II acknowledges\n" +
                         "choose from 'energy', 'delay', 'lla', 'edp'  (default: 'edp')")
 
@@ -108,13 +109,17 @@ def parse_args() -> argparse.Namespace:
                         help="secondary metric for timeloop-mapper to optimize for, optional; NOTE: this is what NSGA-II does not acknowledge and is used only for mapping search\n" +
                         "choose from 'energy', 'delay', 'lla', or '' if no secondary metric is desired\n" +
                         "NOTE: edp does not require secondary metric (default: '')")
+    parser.add_argument("--cache_directory", type=str, default="timeloop_caches",
+                        help="Directory to store cache files for hardware metrics estimated by Timeloop. (default: 'timeloop_caches')")
+    parser.add_argument("--cache_name", type=str, default="cache",
+                        help="Name of the cache file to store hardware metrics estimated by Timeloop. (default: 'cache')")
+    parser.add_argument("--run_id", type=str, default="1",
+                        help="ID of the current run to distinguish its own cache for writing privileges. (default: 'cache')")
     # Miscs
     parser.add_argument("-s", "--manual_seed", default=42, type=int,
                         help="manual seed for reproducibility. -1 means random. (default: 42)")
     parser.add_argument("-D", "--deterministic", action="store_true",
                         help="enable deterministic mode for CUDA (may impact performance)")
-    parser.add_argument("--cache_datasets", action="store_true",
-                        help="cache datasets during QAT")
     parser.add_argument("--logs_dir", type=str, default="/tmp/run" + datetime.datetime.now().strftime("-%Y%m%d-%H%M%S"),
                         help="logs dir (default: '/tmp/run' + datetime.datetime.now().strftime('-%Y%m%d-%H%M%S'))")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -127,9 +132,7 @@ def main():
 
     if args.multigpu:
         print("Initializing QAT NSGA-II MultiGPU")
-        raise NotImplementedError
-        # TODO
-        # nsga = MultiGPUQATNSGA(**vars(args))
+        nsga = MultiGPUQATNSGA(**vars(args))
     else:
         print("Initializing QAT NSGA-II")
         nsga = QATNSGA(**vars(args))

@@ -191,7 +191,6 @@ def parse_pytorch_model(input_size: str, model_file: str, batch_size: int, out_d
             print("    " + str(layer) + ",")
         print("]")
 
-    print(out_dir)
     with open(os.path.join(out_dir, out_file + ".yaml"), "w") as f:
         f.write(f"api: pytorch\n")
         f.write(f"model: " + architecture + "\n")

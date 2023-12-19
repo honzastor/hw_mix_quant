@@ -1,4 +1,4 @@
-# Mixed-Precision Quantization (PyTorch) Framework for Deep Neural Networks
+# Hardware-Aware Mixed-Precision Quantization (PyTorch) Framework for Deep Neural Networks
 
 This repository contains the source code for a specialized framework focused on mixed-precision quantization of neural networks. The framework leverages NSGA-II for searching optimal quantization configurations and an extended version of Timeloop to model mixed-precision data types for hardware metrics retrieval.
 
