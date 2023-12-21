@@ -613,7 +613,6 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
             # Create a uniform quantization config
             args.quant_config = {i: {"Inputs": args.uniform_width, "Weights": args.uniform_width} for i in range(num_quant_layers)}
 
-    print(args.quant_config)
     # Load the model
     if args.resume:
         args.pretrained = True  # set it if user forgets, otherwise the model's state dict is not properly loaded in
