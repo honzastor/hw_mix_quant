@@ -28,7 +28,7 @@ $ conda activate qatizer
 #### PIP
 
 ```shell
-$ pip install -r requirements.yml
+$ pip install -r requirements.txt
 ```
 
 - **IMPORTANT NOTE**: `mapper_facade.py` requires Timeloop+Accelergy infrastructure to be installed. If it is not installed, you will need to use docker or load cached HW metrics – in that case, modifications to `mapper_facade.py` might be necessary. 
