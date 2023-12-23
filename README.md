@@ -25,7 +25,7 @@ $ conda env create --file requirements.yml
 $ conda activate qatizer
 ```
 
-#### PIP
+#### PIP (Python 3.8)
 
 ```shell
 $ pip install -r requirements.txt
