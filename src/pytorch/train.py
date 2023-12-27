@@ -313,7 +313,7 @@ def init_wandb_for_train(args: argparse.Namespace, device: str) -> None:
             wandb.run.name = f"Train-{args.arch}-{args.dataset_name}-{qat_opt}{wandb.run.id}"
 
 
-def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, input_size: int, num_classes: int, device: str, log_file: str) -> nn.Module:
+def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, input_size: int, num_classes: int) -> nn.Module:
     """
     Loads a model from a specified file path.
 
@@ -324,8 +324,6 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
         pretrained_model (str): The path to the file containing the model's saved state dictionary.
         input_size (int): Input image data size.
         num_classes (int): Number of classes for the classification task.
-        device (str): The device (CPU or CUDA) that is being used for training.
-        log_file (str): Path to the log file.
 
     Returns:
         nn.Module: The loaded model.
