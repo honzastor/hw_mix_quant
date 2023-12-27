@@ -197,7 +197,7 @@ def init_logging(args: argparse.Namespace) -> Tuple[Logger, str, str, str]:
     else:
         curr_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         qat_opt = "qat_" if args.qat else ""
-        checkpoint_dir = os.path.join(args.checkpoint_path, f"chkpt_{args.arch}_{args.dataset_name}_{qat_opt}{curr_time}")
+        checkpoint_dir = os.path.join(args.checkpoint_path, f"chkpt_{args.arch}_{args.dataset_name}_{qat_opt}{curr_time}_{args.gpu_id}")
         os.makedirs(checkpoint_dir, exist_ok=True)
         log_file = os.path.join(checkpoint_dir, "log.txt") if args.log else ""
         log_print("---STARTING TRAINING SCRIPT---\n", args, log_file, first_write=True)
@@ -631,7 +631,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
 
     # Print model details if verbose
     total_params, trainable_params = count_parameters(model)
-    model_size = get_model_size(model)
+    model_size = get_model_size(model, args.gpu_id)
     messages = (
         f"Model Architecture: {args.arch}\n"
         f"Total Parameters: {total_params}\n"
@@ -771,7 +771,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
         logger.append(["\n    AFTER QAT", "      Loss", "Top-1 Acc", "Top-5 Acc"])
         logger.append([f"Converted INT model", f"{int_loss:4.6f}", f"{int_val_top1:7.6f}", f"{int_val_top5:9.6f}"])
 
-        qat_model_size = get_model_size(model)
+        qat_model_size = get_model_size(model, args.gpu_id)
         messages = (
             f"Model Size After QAT: {qat_model_size:.2f} MB\n"
             f"After QAT Top-1 Accuracy: {int_val_top1}\n"

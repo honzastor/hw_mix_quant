@@ -383,7 +383,7 @@ def main() -> None:
 
     # Print model details if verbose
     total_params, trainable_params = count_parameters(model)
-    model_size = get_model_size(model)
+    model_size = get_model_size(model, args.gpu_id)
     messages = (
         f"Model Architecture: {args.arch}\n"
         f"Total Parameters: {total_params}\n"
