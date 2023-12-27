@@ -337,11 +337,6 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
     arg_dict["input_size"] = input_size
     model = arch(**arg_dict)
 
-    # Check for multiple GPUs and wrap the model with DataParallel if so
-    if torch.cuda.device_count() > 1:
-        log_print(f"Using {torch.cuda.device_count()} GPUs\n", args, log_file)
-        model = nn.DataParallel(model)
-    model.to(device)
     return model
 
 
