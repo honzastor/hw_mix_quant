@@ -186,7 +186,7 @@ class QATNSGA(NSGA):
         """
         print("Getting maximal values of metrics...")
         max_quant_config = {i: {"Inputs": 8, "Weights": 8} for i in range(self._quantizable_layers)}
-        results = list(self.get_analyzer().analyze([{"quant_conf": max_quant_config}]))[0]
+        results = list(self.get_analyzer().analyze([{"quant_conf": max_quant_config}], -1))[0]
 
         return {
             "accuracy": results["accuracy"],
@@ -419,12 +419,13 @@ class QATAnalyzer(NSGAAnalyzer):
 
         print("Cache loaded %d" % (len(self.cache)))
 
-    def analyze(self, quant_configuration_set: List[Dict[str, Any]]) -> Generator[Dict[str, Any], None, None]:
+    def analyze(self, quant_configuration_set: List[Dict[str, Any]], current_gen: int) -> Generator[Dict[str, Any], None, None]:
         """
         Analyze configurations.
 
         Args:
             quant_configuration_set (List[Dict[str, Any]]): List of configurations for evaluation.
+            current_gen (int): Number of current generation being analyzed.
 
         Yields:
             Dict[str, Any]: The analyzed configuration with accuracy, hardware parameters, and other relevant metrics.
@@ -463,7 +464,9 @@ class QATAnalyzer(NSGAAnalyzer):
             else:  # Not found in cache
                 checkpoints_dir = None
                 if self._checkpoints_dir_pattern is not None:
-                    checkpoints_dir = self._checkpoints_dir_pattern % '_'.join(map(lambda x: str(x), quant_conf))
+                    # quant_conf_str = '_'.join(map(lambda x: str(x), quant_conf))
+                    # checkpoints_dir = self._checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
+                    checkpoints_dir = self._checkpoints_dir_pattern % ("generation_" + str(current_gen))
 
                 qat_args = self._create_namespace_to_call_train()
                 qat_args.checkpoint_path = checkpoints_dir

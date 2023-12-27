@@ -20,12 +20,13 @@ class NSGAAnalyzer(abc.ABC):
     """
 
     @abc.abstractmethod
-    def analyze(self, configurations: List) -> List:
+    def analyze(self, configurations: List, current_gen: int) -> List:
         """
         This method analyzes a list of chromosomes and returns them with their evaluations.
 
         Args:
             configurations (List): A list of configurations (chromosomes) that need to be analyzed.
+            current_gen (int): Number of current generation being analyzed.
 
         Returns:
             List: A list of configurations with evaluations added to each one.
@@ -282,7 +283,7 @@ class NSGA(abc.ABC):
         print("Generation %d" % g)
         print("generation:%d;cache=%s" % (g, str(self.get_analyzer())))
         # initial results from previous data:
-        analyzed_offsprings = list(self.get_analyzer().analyze(current_state.get_offsprings()))
+        analyzed_offsprings = list(self.get_analyzer().analyze(current_state.get_offsprings(), g))
         current_state.set_offsprings(analyzed_offsprings)
         current_state.save_to(logs_dir=self.logs_dir)
 
@@ -318,7 +319,7 @@ class NSGA(abc.ABC):
             self._generate_run_information()
 
             parents = self.get_init_parents()
-            next_parents = list(self.get_analyzer().analyze(parents))
+            next_parents = list(self.get_analyzer().analyze(parents, 0))
             self.state = NSGAState(generation=0, parents=next_parents, offsprings=[])
 
         while self.get_current_state().get_generation() <= self.generations:

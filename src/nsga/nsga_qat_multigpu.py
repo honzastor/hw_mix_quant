@@ -200,7 +200,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
         return args
 
-    def analyze(self, quant_configuration_set: List[Dict[str, Any]]) -> Generator[Dict[str, Any], None, None]:
+    def analyze(self, quant_configuration_set: List[Dict[str, Any]], current_gen: int) -> Generator[Dict[str, Any], None, None]:
         """
         Analyze configurations on multiple GPUs.
 
@@ -208,6 +208,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
         Args:
             quant_configuration_set (List[Dict[str, Any]]): List of configurations for evaluation.
+            current_gen (int): Number of current generation being analyzed.
 
         Yields:
             Dict[str, Any]: The analyzed configuration with accuracy, hardware parameters, and other relevant metrics.
@@ -229,7 +230,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         if self._verbose:
             print(f"Needs eval: {needs_eval} on {num_gpus} GPUs.")
         with ThreadPoolExecutor(max_workers=num_gpus) as pool:
-            results = list(pool.map(self.get_eval_of_config, needs_eval))
+            results = list(pool.map(self.get_eval_of_config, needs_eval, current_gen))
         if self._verbose:
             print("Eval done")
 
@@ -286,7 +287,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
             yield node
 
-    def get_eval_of_config(self, quant_config: Dict[str, Any]) -> Tuple[float, Dict[str, Any], Dict[str, float]]:
+    def get_eval_of_config(self, quant_config: Dict[str, Any], current_gen: int) -> Tuple[float, Dict[str, Any], Dict[str, float]]:
         """
         Evaluate a configuration on an available GPU.
 
@@ -294,6 +295,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
         Args:
             quant_config (Dict[str, Any]): Configuration to be evaluated.
+            current_gen (int): Number of current generation being analyzed.
 
         Returns:
             Tuple[float, Dict[str, Any], Dict[str, float]]: A tuple containing the accuracy, hardware parameters, and timing metrics.
@@ -314,8 +316,9 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             else:
                 checkpoints_dir = None
                 if self._checkpoints_dir_pattern is not None:
-                    checkpoints_dir = self._checkpoints_dir_pattern % '_'.join(
-                        map(lambda x: str(x), quant_config['quant_conf']))
+                    # quant_conf_str = '_'.join(map(lambda x: str(x), quant_conf))
+                    # checkpoints_dir = self._checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
+                    checkpoints_dir = self._checkpoints_dir_pattern % ("generation_" + str(current_gen))
 
                 # Prepare and run training on the specified GPU
                 qat_args = self._create_namespace_to_call_train(gpu_id=device_id)
