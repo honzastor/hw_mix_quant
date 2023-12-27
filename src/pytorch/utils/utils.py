@@ -256,19 +256,20 @@ class Logger(object):
             self._file.close()
 
 
-def get_model_size(model: torch.nn.Module) -> float:
+def get_model_size(model: torch.nn.Module, run_id: int) -> float:
     """
     Calculates the size of the model in megabytes (MB).
 
     Args:
         model (torch.nn.Module): PyTorch model.
+        run_id (int): Unique id to separate runs executed in parallel.
 
     Returns:
         float: Size of the model in MB.
     """
-    torch.save(model.state_dict(), "tmp.p")
-    model_size = os.path.getsize("tmp.p")/1e6
-    os.remove('tmp.p')
+    torch.save(model.state_dict(), f"tmp_{run_id}.p")
+    model_size = os.path.getsize(f"tmp_{run_id}.p")/1e6
+    os.remove(f"tmp_{run_id}.p")
     return model_size
 
 
