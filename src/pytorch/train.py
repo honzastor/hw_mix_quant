@@ -11,6 +11,7 @@ import argparse
 import json
 import copy
 from argparse import RawTextHelpFormatter
+from threading import Lock
 import wandb
 import torch
 import torch.nn as nn
@@ -561,16 +562,26 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
     if args is None:
         args = parse_args()
     args.act_function = get_activation_function(args.act_function)
+    if not hasattr(args, 'qat_evaluation_lock'):  # Check if the shared lock is passed (from multigpu nsga), otherwise use a standard lock
+        args.qat_evaluation_lock = Lock()
     device = setup_device_and_seed(args=args)
     init_wandb_for_train(args=args, device=device)
     logger, checkpoint_dir, settings_log, log_file = init_logging(args=args)
 
     # Log run's settings into JSON
+    # Temporarily save and remove the lock from args (TO ENABLE THE DEEPCOPY)
+    temp_lock = args.qat_evaluation_lock if 'qat_evaluation_lock' in args.__dict__ else None
+    if 'qat_evaluation_lock' in args.__dict__:
+        del args.__dict__['qat_evaluation_lock']
     settings = copy.deepcopy(vars(args))
     settings["act_function"] = str(settings["act_function"])
     settings["device"] = str(device)
     with open(settings_log, 'w') as f:
         json.dump(settings, f, indent=2)
+
+    # Restore the lock in args
+    if temp_lock:
+        args.qat_evaluation_lock = temp_lock
 
     messages = (
         f"Using {device} device\n"
@@ -750,10 +761,12 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
         }, is_best=False, checkpoint_dir=checkpoint_dir, filename="model_after_qat.pth.tar")
         save_checkpoint(checkpoint_data=model, is_best=False, checkpoint_dir=checkpoint_dir, filename="jit_model_after_qat.pth.tar", jit=True)
 
-        print("\n\n------Testing accuracy after converting the model into INT------")
-        # Setting the batch size for eval low here to prevent possible run out of RAM
-        cpu_val_loader = data_loader.load_validation_data(batch_size=16, num_workers=args.workers, pin_memory=False)
-        int_loss, int_val_top1, int_val_top5 = test(model, cpu_val_loader, criterion, "cpu", log_file)
+        # Locked cpu evaluation
+        with args.qat_evaluation_lock:
+            print("\n\n------Testing accuracy after converting the model into INT------")
+            # Setting the batch size for eval low here to prevent possible run out of RAM
+            cpu_val_loader = data_loader.load_validation_data(batch_size=16, num_workers=args.workers, pin_memory=False)
+            int_loss, int_val_top1, int_val_top5 = test(model, cpu_val_loader, criterion, "cpu", log_file)
 
         logger.append(["\n    AFTER QAT", "      Loss", "Top-1 Acc", "Top-5 Acc"])
         logger.append([f"Converted INT model", f"{int_loss:4.6f}", f"{int_val_top1:7.6f}", f"{int_val_top5:9.6f}"])

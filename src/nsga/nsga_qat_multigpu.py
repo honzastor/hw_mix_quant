@@ -12,6 +12,7 @@ import torchvision.models as models
 from typing import Optional, Dict, List, Any, Tuple, Generator
 import concurrent
 from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 from threading import Lock
 from queue import Queue
 
@@ -86,6 +87,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         self._queue = None
         self._timeloop_pool = ThreadPoolExecutor(max_workers=1)  # Only 1 Timeloop can run at a time
         self._lock = Lock()
+        self._qat_evaluation_lock = multiprocessing.Lock()  # Limit the number of concurrent after-qat converted model evaluations on CPU to just 1
 
     @property
     def queue(self) -> Queue:
@@ -170,6 +172,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         args.symmetric_quant = self._symmetric_quant
         args.per_channel_quant = self._per_channel_quant
         args.quant_setting = "non_uniform"
+        args.qat_evaluation_lock = self._qat_evaluation_lock
         # Dataset
         args.data = self._data
         args.dataset_name = self._dataset_name
@@ -230,7 +233,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         if self._verbose:
             print(f"Needs eval: {needs_eval} on {num_gpus} GPUs.")
         with ThreadPoolExecutor(max_workers=num_gpus) as pool:
-            results = list(pool.map(self.get_eval_of_config, needs_eval, current_gen))
+            results = list(pool.map(lambda qc: self.get_eval_of_config(qc, current_gen), needs_eval))
         if self._verbose:
             print("Eval done")
 
@@ -337,7 +340,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                 timeloop_time = quant_config["timeloop_time"]
             else:
                 # Initialize MapperFacade for running Timeloop or reading cached metrics
-                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture, run_id=self._run_id)
+                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture, run_id=str(self._run_id) + "_" + str(device_id))
 
                 # Determine num_classes and input_size based on dataset_name
                 if self._dataset_name == "imagenet":
