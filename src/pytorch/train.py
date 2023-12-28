@@ -622,7 +622,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
     # Load the model
     if args.resume:
         args.pretrained = True  # set it if user forgets, otherwise the model's state dict is not properly loaded in
-    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, input_size=data_loader.input_size, num_classes=num_classes)
+    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, input_size=data_loader.input_size, num_classes=num_classes, device=device)
 
     # Print model details if verbose
     total_params, trainable_params = count_parameters(model)
