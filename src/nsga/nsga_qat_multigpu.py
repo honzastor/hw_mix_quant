@@ -104,7 +104,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             self._queue = Queue()
             cuda_devices = torch.cuda.device_count()
             for device_id in range(cuda_devices):
-                self._queue.put(f"cuda:{device_id}")
+                self._queue.put(str(device_id))
         return self._queue
 
     def update_cache(self, node_to_update: Dict[str, Any]) -> None:
@@ -334,7 +334,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                 train_time = time.time() - start_train
 
             # Check if hardware params are already in quant_config
-            collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla"]  # NOTE add more if needed
+            collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla", f"total_memsize_words"]  # NOTE add more if needed
             if all(x in quant_config for x in collected_params):
                 total_hw_metrics = {param: quant_config[param] for param in collected_params}
                 timeloop_time = quant_config["timeloop_time"]

@@ -313,7 +313,7 @@ def init_wandb_for_train(args: argparse.Namespace, device: str) -> None:
             wandb.run.name = f"Train-{args.arch}-{args.dataset_name}-{qat_opt}{wandb.run.id}"
 
 
-def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, input_size: int, num_classes: int, device: str) -> nn.Module:
+def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, input_size: int, num_classes: int, device: str, log_file: str) -> nn.Module:
     """
     Loads a model from a specified file path.
 
@@ -325,6 +325,7 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
         input_size (int): Input image data size.
         num_classes (int): Number of classes for the classification task.
         device (str): The device (CPU or CUDA) that is being used for training.
+        log_file (str): Path to the log file.
 
     Returns:
         nn.Module: The loaded model.
@@ -336,6 +337,10 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
     arg_dict["input_size"] = input_size
     model = arch(**arg_dict)
 
+    # # Check for multiple GPUs and wrap the model with DataParallel if so
+    # if torch.cuda.device_count() > 1:
+    #     log_print(f"Using {torch.cuda.device_count()} GPUs\n", args, log_file)
+    #     model = nn.DataParallel(model)
     model.to(device)
     return model
 
@@ -622,7 +627,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
     # Load the model
     if args.resume:
         args.pretrained = True  # set it if user forgets, otherwise the model's state dict is not properly loaded in
-    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, input_size=data_loader.input_size, num_classes=num_classes, device=device)
+    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, input_size=data_loader.input_size, num_classes=num_classes, device=device, log_file=log_file)
 
     # Print model details if verbose
     total_params, trainable_params = count_parameters(model)
