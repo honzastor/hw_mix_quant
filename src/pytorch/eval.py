@@ -228,7 +228,7 @@ def init_wandb_for_eval(args: argparse.Namespace, device: str) -> None:
         wandb.run.name = "Eval-" + wandb.run.id
 
 
-def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, quantized: bool, input_size: int, num_classes: int, device: str, log_file: str) -> nn.Module:
+def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, input_size: int, num_classes: int, device: str) -> nn.Module:
     """
     Loads a model from a specified file path.
 
@@ -237,11 +237,9 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
                                    configuration for wandb and other evaluation settings.
         arch (Callable): A callable that returns an instance of the desired model architecture.
         pretrained_model (str): The path to the file containing the model's saved state dictionary.
-        quantized (bool): Specifies whether the pretrained model has already been quantized or is still in floating-point precision.
         input_size (int): Input image data size.
         num_classes (int): Number of classes for the classification task.
         device (str): The device (CPU or CUDA) that is being used for evaluation.
-        log_file (str): Path to the log file.
 
     Returns:
         nn.Module: The loaded model.
@@ -253,10 +251,6 @@ def load_model(args: argparse.Namespace, arch: Callable, pretrained_model: str, 
     arg_dict["input_size"] = input_size
     model = arch(**arg_dict)
 
-    # Check for multiple GPUs and wrap the model with DataParallel if so
-    if torch.cuda.device_count() > 1:
-        log_print(f"Using {torch.cuda.device_count()} GPUs\n", args, log_file)
-        model = nn.DataParallel(model)
     model.to(device)
     return model
 
@@ -374,7 +368,7 @@ def main() -> None:
             args.quant_config = {i: {"Inputs": args.uniform_width, "Weights": args.uniform_width} for i in range(num_quant_layers)}
 
     # Load the model
-    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, quantized=args.quantized, input_size=data_loader.input_size, num_classes=num_classes, device=device, log_file=log_file)
+    model = load_model(args=args, arch=models.__dict__[args.arch], pretrained_model=args.pretrained_model, input_size=data_loader.input_size, num_classes=num_classes, device=device)
     if args.qat and not args.quantized:
         print("Converting model to quantized form")
         model.to("cpu")
