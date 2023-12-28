@@ -104,7 +104,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             self._queue = Queue()
             cuda_devices = torch.cuda.device_count()
             for device_id in range(cuda_devices):
-                self._queue.put(str(device_id))
+                self._queue.put(device_id)
         return self._queue
 
     def update_cache(self, node_to_update: Dict[str, Any]) -> None:
