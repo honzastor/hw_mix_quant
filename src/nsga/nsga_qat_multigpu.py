@@ -9,19 +9,15 @@ import datetime
 import copy
 import torch
 import torchvision.models as models
-from typing import Optional, Dict, List, Any, Tuple, Generator
+from typing import Optional, Dict, List, Any, Tuple, Generator, OrderedDict
 import concurrent
-from concurrent.futures import ThreadPoolExecutor
-import multiprocessing
-from threading import Lock
-from queue import Queue
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import Lock, Queue, Manager
 
-from .nsga import NSGAAnalyzer
-from .nsga_qat import QATNSGA, QATAnalyzer
+from .nsga_qat import QATNSGA, QATAnalyzer, transform_to_timeloop_quant_config, create_namespace_to_call_train
 from pytorch import train
 import pytorch.models as custom_models
 from mapper_facade import MapperFacade
-from mapper_facade import JSONEncoder
 
 
 # Get list of PyTorch model names
@@ -84,27 +80,24 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         """
         super().__init__(model_name, pretrained_model, act_function, data, dataset_name, train_batch, test_batch, workers,
                          cache_directory, cache_name, run_id, qat_epochs, lr, lr_type, gamma, momentum, weight_decay, manual_seed, deterministic, symmetric_quant, per_channel_quant, checkpoints_dir_pattern, timeloop_heuristic, timeloop_architecture, primary_metric, secondary_metric, total_valid, verbose)
-        self._queue = None
-        self._timeloop_pool = ThreadPoolExecutor(max_workers=1)  # Only 1 Timeloop can run at a time
+        manager = Manager()
+        cuda_devices = torch.cuda.device_count()
+        self._queue = manager.Queue()
+        for device_id in range(cuda_devices):
+            self._queue.put(device_id)
+        self._timeloop_pool = ProcessPoolExecutor(max_workers=1)  # Only 1 Timeloop can run at a time
+        self._gpu_pool = ProcessPoolExecutor(max_workers=cuda_devices)
         self._lock = Lock()
-        self._qat_evaluation_lock = multiprocessing.Lock()  # Limit the number of concurrent after-qat converted model evaluations on CPU to just 1
+        self._qat_evaluation_lock = manager.Lock()  # Limit the number of concurrent after-qat converted model evaluations on CPU to just 1
 
     @property
     def queue(self) -> Queue:
         """
         A property that returns a queue of available GPU devices.
 
-        If the queue is not initialized, it creates a new queue and populates it
-        with the identifiers of the available CUDA devices.
-
         Returns:
             Queue: A queue with available GPU device identifiers.
         """
-        if self._queue is None:
-            self._queue = Queue()
-            cuda_devices = torch.cuda.device_count()
-            for device_id in range(cuda_devices):
-                self._queue.put(device_id)
         return self._queue
 
     def update_cache(self, node_to_update: Dict[str, Any]) -> None:
@@ -151,58 +144,6 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         with self._lock:
             return next((x for x in self.cache if x["quant_conf"] == quant_config), None)
 
-    def _create_namespace_to_call_train(self, gpu_id: str) -> argparse.Namespace:
-        """
-        Creates an argparse.Namespace object with values from this QATAnalyzer instance to be used for calling the training script.
-
-        Args:
-            gpu_id (str): CUDA ID to use.
-        Returns:
-            argparse.Namespace: The namespace object with arguments for training.
-        """
-        # Create a Namespace object with default values
-        args = argparse.Namespace()
-        # Map the instance variables to the namespace arguments
-        # Model options
-        args.pretrained = True if self._pretrained_model != "" else False
-        args.pretrained_model = self._pretrained_model
-        args.arch = self._model_name
-        args.act_function = self._act_function
-        args.qat = True
-        args.symmetric_quant = self._symmetric_quant
-        args.per_channel_quant = self._per_channel_quant
-        args.quant_setting = "non_uniform"
-        args.qat_evaluation_lock = self._qat_evaluation_lock
-        # Dataset
-        args.data = self._data
-        args.dataset_name = self._dataset_name
-        args.train_batch = self._train_batch_size
-        args.test_batch = self._test_batch_size
-        args.workers = self._workers
-        # Train options
-        args.epochs = self._qat_epochs
-        args.lr = self._lr
-        args.lr_type = self._lr_type
-        args.gamma = self._gamma
-        args.momentum = self._momentum
-        args.weight_decay = self._weight_decay
-        args.manual_seed = self._manual_seed
-        args.deterministic = self._deterministic
-        args.start_epoch = 0
-        args.freeze_epochs = 0
-        args.warmup_epoch = 0
-        args.resume = False
-        # Device options
-        args.gpu_id = gpu_id
-        # Miscs
-        args.manual_seed = self._manual_seed
-        args.deterministic = self._deterministic
-        args.verbose = self._verbose
-        args.log = True
-        args.wandb = False
-
-        return args
-
     def analyze(self, quant_configuration_set: List[Dict[str, Any]], current_gen: int) -> Generator[Dict[str, Any], None, None]:
         """
         Analyze configurations on multiple GPUs.
@@ -228,12 +169,11 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
             needs_eval.append(entry)
 
-        # Using ThreadPoolExecutor for parallel processing
+        # Using ProcessPoolExecutor for parallel processing (inside get_eval_of_configs())
         num_gpus = torch.cuda.device_count()
         if self._verbose:
             print(f"Needs eval: {needs_eval} on {num_gpus} GPUs.")
-        with ThreadPoolExecutor(max_workers=num_gpus) as pool:
-            results = list(pool.map(lambda qc: self.get_eval_of_config(qc, current_gen), needs_eval))
+        results = self.get_eval_of_configs(needs_eval, current_gen)
         if self._verbose:
             print("Eval done")
 
@@ -290,57 +230,38 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
 
             yield node
 
-    def get_eval_of_config(self, quant_config: Dict[str, Any], current_gen: int) -> Tuple[float, Dict[str, Any], Dict[str, float]]:
+    def get_eval_of_configs(self, quant_configs: List[Dict[str, Any]], current_gen: int) -> List[Tuple[float, Dict[str, Any], Dict[str, float]]]:
         """
-        Evaluate a configuration on an available GPU.
+        Evaluate configurations an available GPUs.
 
         This includes training the model and running Timeloop for hardware parameter estimation.
 
         Args:
-            quant_config (Dict[str, Any]): Configuration to be evaluated.
+            quant_configs (List[Dict[str, Any]]): Configurations to be evaluated.
             current_gen (int): Number of current generation being analyzed.
 
         Returns:
-            Tuple[float, Dict[str, Any], Dict[str, float]]: A tuple containing the accuracy, hardware parameters, and timing metrics.
+            List[Tuple[float, Dict[str, Any], Dict[str, float]]]: A list of tuples containing the accuracy, hardware parameters, and timing metrics.
         """
-        # Retrieve an available GPU from the queue
-        device_id = self.queue.get()
-        try:
+        collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla", f"total_memsize_words"]  # NOTE add more if needed
+        train_futures = {}
+        timeloop_futures = {}
+        results = []
+
+        # Iterate each quantization configuration and submit tasks for evaluation or retrieve precached metrics
+        for quant_config in quant_configs:
+            quant_conf_str = json.dumps(quant_config['quant_conf'], sort_keys=True)
             start_total = time.time()
-            if self._verbose:
-                print(f"Evaluating quant config {quant_config['quant_conf']} on GPU {device_id}")
-            # Set the current device for PyTorch
-            torch.cuda.set_device(device_id)
+            # If accuracy is not precomputed, submit training task
+            if "accuracy" not in quant_config:
+                # Submit training task on available GPU
+                train_future = self.submit_train_task(quant_config, current_gen)
+                train_futures[quant_conf_str] = train_future
 
-            # Check if accuracy is already in quant_config
-            if "accuracy" in quant_config:
-                accuracy = quant_config["accuracy"]
-                train_time = quant_config["train_time"]
-            else:
-                checkpoints_dir = None
-                if self._checkpoints_dir_pattern is not None:
-                    # quant_conf_str = '_'.join(map(lambda x: str(x), quant_conf))
-                    # checkpoints_dir = self._checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
-                    checkpoints_dir = self._checkpoints_dir_pattern % ("generation_" + str(current_gen))
-
-                # Prepare and run training on the specified GPU
-                qat_args = self._create_namespace_to_call_train(gpu_id=device_id)
-                qat_args.checkpoint_path = checkpoints_dir
-                qat_args.non_uniform_width = quant_config['quant_conf']
-
-                # Run training on CUDA
-                start_train = time.time()
-                accuracy = train.main(qat_args)
-                train_time = time.time() - start_train
-
-            # Check if hardware params are already in quant_config
-            collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla", f"total_memsize_words"]  # NOTE add more if needed
-            if all(x in quant_config for x in collected_params):
-                total_hw_metrics = {param: quant_config[param] for param in collected_params}
-                timeloop_time = quant_config["timeloop_time"]
-            else:
+            # If hardware params are not precomputed, submit Timeloop task
+            if not all(param in quant_config for param in collected_params):
                 # Initialize MapperFacade for running Timeloop or reading cached metrics
-                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture, run_id=str(self._run_id) + "_" + str(device_id))
+                mapper_facade = MapperFacade(configs_rel_path="timeloop_utils/timeloop_configs", architecture=self._timeloop_architecture, run_id=str(self._run_id))
 
                 # Determine num_classes and input_size based on dataset_name
                 if self._dataset_name == "imagenet":
@@ -356,47 +277,65 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                     raise ValueError(f"Unknown dataset_name: {self._dataset_name}. Add support for it here.")
 
                 # Run Timeloop on CPU
-                start_timeloop = time.time()
-                timeloop_run = self.submit_timeloop_task(mapper_facade, quant_config['quant_conf'], in_size, num_classes)
-                hardware_params = timeloop_run.result()  # Wait for Timeloop task to complete
-                timeloop_time = time.time() - start_timeloop
+                timeloop_future = self.submit_timeloop_task(mapper_facade, quant_config['quant_conf'], in_size, num_classes)
+                timeloop_futures[quant_conf_str] = timeloop_future
 
-                # NOTE add more if needed
-                total_energy = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["energy"]]), hardware_params.values()))
-                total_edp = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
-                total_delay = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
-                total_lla = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
-                total_memsize = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_words"]]), hardware_params.values()))
+        # Wait for training futures and collect results
+        for quant_conf_str, future in train_futures.items():
+            accuracy, train_time = future.result()
+            quant_conf = json.loads(quant_conf_str)  # Deserializing back to dictionary
+            quant_conf = {int(k): v for k, v in quant_conf.items()}
 
-                # Add calculated metrics to the dictionary
-                total_hw_metrics = {
-                    "total_energy": total_energy,
-                    "total_edp": total_edp,
-                    "total_delay": total_delay,
-                    "total_lla": total_lla,
-                    "total_memsize_words": total_memsize
-                }
+            # Retrieve the corresponding quant_config
+            corresponding_quant_config = next((setting for setting in quant_configs if setting['quant_conf'] == quant_conf), None)
+            # Update the quant_config with training results
+            corresponding_quant_config["accuracy"] = accuracy
+            corresponding_quant_config["train_time"] = train_time
 
-            # Check if total_time is already in quant_config (it should)
-            if "total_time" in quant_config:
-                total_time = quant_config["total_time"]
-            else:
-                total_time = time.time() - start_total
+        # Wait for Timeloop futures and collect results
+        for quant_conf_str, future in timeloop_futures.items():
+            hardware_params, timeloop_time = future.result()
+            quant_conf = json.loads(quant_conf_str)  # Deserializing back to dictionary
+            quant_conf = {int(k): v for k, v in quant_conf.items()}
 
-            times = {
-                "total_time": total_time,
-                "train_time": train_time,
-                "timeloop_time": timeloop_time
-            }
+            # Retrieve the corresponding quant_config
+            corresponding_quant_config = next((setting for setting in quant_configs if setting['quant_conf'] == quant_conf), None)
 
-            return accuracy, total_hw_metrics, times
-        finally:
-            # Release the GPU back to the queue
-            self.queue.put(device_id)
+            # Update the quant_config with the Timeloop results
+            # NOTE add more if needed
+            corresponding_quant_config["total_energy"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["energy"]]), hardware_params.values()))
+            corresponding_quant_config["total_edp"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
+            corresponding_quant_config["total_delay"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
+            corresponding_quant_config["total_lla"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
+            corresponding_quant_config["total_memsize_words"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_words"]]), hardware_params.values()))
+            corresponding_quant_config["timeloop_time"] = timeloop_time
+
+        # Combine and return all results
+        for quant_config in quant_configs:
+            # All data should be present in quant_config by now
+            accuracy = quant_config["accuracy"]
+            total_hw_metrics = {param: quant_config[param] for param in collected_params}
+            train_time = quant_config["train_time"]
+            timeloop_time = quant_config["timeloop_time"]
+            total_time = quant_config["total_time"] if "total_time" in quant_config else time.time() - start_total
+            results.append((accuracy, total_hw_metrics, {"total_time": total_time, "train_time": train_time, "timeloop_time": timeloop_time}))
+        return results
+
+    def submit_train_task(self, quant_config: Dict[str, Any], current_gen: int):
+        """
+        Submits a QAT training task to the ProcessPoolExecutor for asynchronous execution.
+
+        Args:
+            quant_config (Dict[str, Any]): The quantization configuration for which to run QAT.
+
+        Returns:
+            concurrent.futures.Future: A Future object representing the asynchronous execution of QAT.
+        """
+        return self._gpu_pool.submit(train_task, quant_config, current_gen, self._checkpoints_dir_pattern, self._pretrained_model, self._model_name, self._act_function, self._symmetric_quant, self._per_channel_quant, self._data, self._dataset_name, self._train_batch_size, self._test_batch_size, self._workers, self._qat_epochs, self._lr, self._lr_type, self._gamma, self._momentum, self._weight_decay, self._manual_seed, self._deterministic, self._qat_evaluation_lock, self._verbose, self.queue)
 
     def submit_timeloop_task(self, mapper_facade: MapperFacade, quant_config: Dict[str, Any], in_size: str, num_classes: int) -> concurrent.futures.Future:
         """
-        Submits a Timeloop MapperFacade task to the ThreadPoolExecutor for asynchronous execution.
+        Submits a Timeloop MapperFacade task to the ProcessPoolExecutor for asynchronous execution.
 
         Args:
             mapper_facade (MapperFacade): An instance of the MapperFacade class used to run Timeloop mapper and retrieve hardware metrics.
@@ -407,33 +346,119 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         Returns:
             concurrent.futures.Future: A Future object representing the asynchronous execution of Timeloop.
         """
-        def task():
-            if self._pretrained_model != "":
-                return mapper_facade.get_hw_params_parse_model(
-                    model=self._pretrained_model,
-                    arch=self._model_name,
-                    batch_size=1,
-                    bitwidths=self.transform_to_timeloop_quant_config(quant_config),
-                    input_size=in_size,
-                    threads=8,
-                    heuristic=self._timeloop_heuristic,
-                    metrics=(self._primary_metric, self._secondary_metric),
-                    total_valid=self._total_valid,
-                    cache_dir=self._cache_directory,
-                    cache_name=self._cache_name,
-                    verbose=self._verbose)
-            else:
-                return mapper_facade.get_hw_params_create_model(
-                    model=self._model_name,
-                    num_classes=num_classes,
-                    batch_size=1,
-                    bitwidths=self.transform_to_timeloop_quant_config(quant_config),
-                    input_size=in_size,
-                    threads=8,
-                    heuristic=self._timeloop_heuristic,
-                    metrics=(self._primary_metric, self._secondary_metric),
-                    total_valid=self._total_valid,
-                    cache_dir=self._cache_directory,
-                    cache_name=self._cache_name,
-                    verbose=self._verbose)
-        return self._timeloop_pool.submit(task)
+        return self._timeloop_pool.submit(timeloop_task, mapper_facade, self._pretrained_model, self._model_name, quant_config, in_size, num_classes, self._timeloop_heuristic, self._primary_metric, self._secondary_metric, self._total_valid, self._cache_directory, self._cache_name, self._verbose)
+
+
+def train_task(quant_config: Dict[str, Any], current_gen: int, checkpoints_dir_pattern: str, pretrained_model: str, model_name: str, act_function: str, symmetric_quant: bool, per_channel_quant: bool, data: str, dataset_name: str, train_batch_size: int, test_batch_size: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, qat_evaluation_lock: Optional[object], verbose: bool, gpu_pool_queue: Queue) -> Tuple[float, float]:
+    """
+    Executes a QAT training task on a specified GPU.
+
+    Args:
+        quant_config: The quantization configuration to be used for training.
+        current_gen: The current generation number in the NSGA-II process.
+        checkpoints_dir_pattern: The pattern for generating the checkpoints directory.
+        pretrained_model: Path to the pretrained model file.
+        model_name: Name of the model architecture to be used.
+        act_function: Activation function used in the model.
+        symmetric_quant: Flag to indicate if symmetric quantization is used.
+        per_channel_quant: Flag to indicate if per-channel quantization is used.
+        data: Path to the training dataset.
+        dataset_name: Name of the dataset.
+        train_batch_size: Batch size for training.
+        test_batch_size: Batch size for testing.
+        workers: Number of worker threads for data loading.
+        qat_epochs: Number of epochs for quantization-aware training.
+        lr: Learning rate for training.
+        lr_type: Type of learning rate scheduler.
+        gamma: Factor for learning rate decay.
+        momentum: Momentum factor for the optimizer.
+        weight_decay: Weight decay factor for the optimizer.
+        manual_seed: Seed for random number generators.
+        deterministic: Flag for deterministic behavior in CUDA operations.
+        qat_evaluation_lock: Lock for synchronizing QAT evaluations. Optional.
+        verbose: Flag for verbose logging.
+        gpu_pool_queue: Queue of available GPU devices.
+
+    Returns:
+        Tuple[float, float]: A tuple containing the accuracy and the training time.
+    """
+    device_id = gpu_pool_queue.get()
+    try:
+        if verbose:
+            print(f"Evaluating quant config {quant_config['quant_conf']} on GPU {device_id}")
+        # Set the current device for PyTorch
+        torch.cuda.set_device(device_id)
+
+        checkpoints_dir = None
+        if checkpoints_dir_pattern is not None:
+            # quant_conf_str = '_'.join(map(lambda x: str(x), quant_conf))
+            # checkpoints_dir = checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
+            checkpoints_dir = checkpoints_dir_pattern % ("generation_" + str(current_gen))
+
+        # Prepare and run training on the specified GPU
+        qat_args = create_namespace_to_call_train(gpu_id=device_id, pretrained_model=pretrained_model, model_name=model_name, act_function=act_function, symmetric_quant=symmetric_quant, per_channel_quant=per_channel_quant, data=data, dataset_name=dataset_name, train_batch_size=train_batch_size, test_batch_size=test_batch_size, workers=workers, qat_epochs=qat_epochs, lr=lr, lr_type=lr_type, gamma=gamma, momentum=momentum, weight_decay=weight_decay, manual_seed=manual_seed, deterministic=deterministic, qat_evaluation_lock=qat_evaluation_lock, verbose=verbose)
+        qat_args.checkpoint_path = checkpoints_dir
+        qat_args.non_uniform_width = quant_config['quant_conf']
+
+        # Run training on CUDA
+        start_train = time.time()
+        accuracy = train.main(qat_args)
+        train_time = time.time() - start_train
+    finally:
+        gpu_pool_queue.put(device_id)
+    return accuracy, train_time
+
+
+def timeloop_task(mapper_facade: MapperFacade, pretrained_model: str, model_name: str, quant_config: Dict[str, Any], in_size: str, num_classes: int, timeloop_heuristic: str, primary_metric: str, secondary_metric: str, total_valid: int, cache_directory: str, cache_name: str, verbose: bool) -> Tuple[Dict[str, Any], float]:
+    """
+    Executes a Timeloop task to estimate hardware parameters for a given quantization configuration.
+
+    Args:
+        mapper_facade: An instance of MapperFacade used to interface with the Timeloop tool.
+        pretrained_model: Path to the pretrained model file, if available.
+        model_name: Name of the model architecture.
+        quant_config: The quantization configuration for which hardware parameters are to be estimated.
+        in_size: The input size of the model.
+        num_classes: The number of classes in the model's output.
+        timeloop_heuristic: Heuristic for the Timeloop mapper.
+        primary_metric: Primary metric for model evaluation.
+        secondary_metric: Secondary metric for model evaluation.
+        total_valid: Total valid mappings to consider in the Timeloop mapper.
+        cache_directory: Directory for storing cache files.
+        cache_name: Name of the cache file.
+        verbose: Flag for verbose logging.
+
+    Returns:
+        Tuple[Dict[str, Any], float]: A tuple containing the hardware parameters and the time taken for Timeloop estimation.
+    """
+    start_timeloop = time.time()
+    if pretrained_model != "":
+        metrics = mapper_facade.get_hw_params_parse_model(
+            model=pretrained_model,
+            arch=model_name,
+            batch_size=1,
+            bitwidths=transform_to_timeloop_quant_config(quant_config),
+            input_size=in_size,
+            threads=8,
+            heuristic=timeloop_heuristic,
+            metrics=(primary_metric, secondary_metric),
+            total_valid=total_valid,
+            cache_dir=cache_directory,
+            cache_name=cache_name,
+            verbose=verbose)
+    else:
+        metrics = mapper_facade.get_hw_params_create_model(
+            model=model_name,
+            num_classes=num_classes,
+            batch_size=1,
+            bitwidths=transform_to_timeloop_quant_config(quant_config),
+            input_size=in_size,
+            threads=8,
+            heuristic=timeloop_heuristic,
+            metrics=(primary_metric, secondary_metric),
+            total_valid=total_valid,
+            cache_dir=cache_directory,
+            cache_name=cache_name,
+            verbose=verbose)
+    timeloop_time = time.time() - start_timeloop
+    return metrics, timeloop_time

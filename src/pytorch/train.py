@@ -562,7 +562,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
     if args is None:
         args = parse_args()
     args.act_function = get_activation_function(args.act_function)
-    if not hasattr(args, 'qat_evaluation_lock'):  # Check if the shared lock is passed (from multigpu nsga), otherwise use a standard lock
+    if not hasattr(args, 'qat_evaluation_lock') or args.qat_evaluation_lock is None:  # Check if the shared lock is passed (from multigpu nsga), otherwise use a standard lock
         args.qat_evaluation_lock = Lock()
     device = setup_device_and_seed(args=args)
     init_wandb_for_train(args=args, device=device)
@@ -765,7 +765,7 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
         with args.qat_evaluation_lock:
             print("\n\n------Testing accuracy after converting the model into INT------")
             # Setting the batch size for eval low here to prevent possible run out of RAM
-            cpu_val_loader = data_loader.load_validation_data(batch_size=16, num_workers=args.workers, pin_memory=False)
+            cpu_val_loader = data_loader.load_validation_data(batch_size=32, num_workers=args.workers, pin_memory=False)
             int_loss, int_val_top1, int_val_top5 = test(model, cpu_val_loader, criterion, "cpu", log_file)
 
         logger.append(["\n    AFTER QAT", "      Loss", "Top-1 Acc", "Top-5 Acc"])

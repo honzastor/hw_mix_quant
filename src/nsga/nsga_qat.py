@@ -337,55 +337,6 @@ class QATAnalyzer(NSGAAnalyzer):
         self.cache = []
         self.load_cache()
 
-    def _create_namespace_to_call_train(self) -> argparse.Namespace:
-        """
-        Creates an argparse.Namespace object with values from this QATAnalyzer instance to be used for calling the training script.
-
-        Returns:
-            argparse.Namespace: The namespace object with arguments for training.
-        """
-        # Create a Namespace object with default values
-        args = argparse.Namespace()
-        # Map the instance variables to the namespace arguments
-        # Model options
-        args.pretrained = True if self._pretrained_model != "" else False
-        args.pretrained_model = self._pretrained_model
-        args.arch = self._model_name
-        args.act_function = self._act_function
-        args.qat = True
-        args.symmetric_quant = self._symmetric_quant
-        args.per_channel_quant = self._per_channel_quant
-        args.quant_setting = "non_uniform"
-        # Dataset
-        args.data = self._data
-        args.dataset_name = self._dataset_name
-        args.train_batch = self._train_batch_size
-        args.test_batch = self._test_batch_size
-        args.workers = self._workers
-        # Train options
-        args.epochs = self._qat_epochs
-        args.lr = self._lr
-        args.lr_type = self._lr_type
-        args.gamma = self._gamma
-        args.momentum = self._momentum
-        args.weight_decay = self._weight_decay
-        args.manual_seed = self._manual_seed
-        args.deterministic = self._deterministic
-        args.start_epoch = 0
-        args.freeze_epochs = 0
-        args.warmup_epoch = 0
-        args.resume = False
-        # Device options NOTE potential change
-        args.gpu_id = "0"
-        # Miscs
-        args.manual_seed = self._manual_seed
-        args.deterministic = self._deterministic
-        args.verbose = self._verbose
-        args.log = True
-        args.wandb = False
-
-        return args
-
     @staticmethod
     def ensure_cache_folder() -> None:
         """
@@ -468,7 +419,7 @@ class QATAnalyzer(NSGAAnalyzer):
                     # checkpoints_dir = self._checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
                     checkpoints_dir = self._checkpoints_dir_pattern % ("generation_" + str(current_gen))
 
-                qat_args = self._create_namespace_to_call_train()
+                qat_args = create_namespace_to_call_train(pretrained_model=self._pretrained_model, model_name=self._model_name, act_function=self._act_function, symmetric_quant=self._symmetric_quant, per_channel_quant=self._per_channel_quant, data=self._data, dataset_name=self._dataset_name, train_batch_size=self._train_batch_size, test_batch_size=self._test_batch_size, workers=self._workers, qat_epochs=self._qat_epochs, lr=self._lr, lr_type=self._lr_type, gamma=self._gamma, momentum=self._momentum, weight_decay=self._weight_decay, manual_seed=self._manual_seed, deterministic=self._deterministic, verbose=self._verbose)
                 qat_args.checkpoint_path = checkpoints_dir
                 qat_args.non_uniform_width = quant_conf
 
@@ -496,7 +447,7 @@ class QATAnalyzer(NSGAAnalyzer):
                     hardware_params = mapper_facade.get_hw_params_parse_model(model=self._pretrained_model,
                                                                               arch=self._model_name,
                                                                               batch_size=1,  # search the space for batch size if just 1..
-                                                                              bitwidths=self.transform_to_timeloop_quant_config(quant_conf),
+                                                                              bitwidths=transform_to_timeloop_quant_config(quant_conf),
                                                                               input_size=in_size,
                                                                               threads=8,
                                                                               heuristic=self._timeloop_heuristic,
@@ -510,7 +461,7 @@ class QATAnalyzer(NSGAAnalyzer):
                     hardware_params = mapper_facade.get_hw_params_create_model(model=self._model_name,
                                                                                num_classes=num_classes,
                                                                                batch_size=1,  # search the space for batch size if just 1..
-                                                                               bitwidths=self.transform_to_timeloop_quant_config(quant_conf),
+                                                                               bitwidths=transform_to_timeloop_quant_config(quant_conf),
                                                                                input_size=in_size,
                                                                                threads=8,
                                                                                heuristic=self._timeloop_heuristic,
@@ -576,30 +527,102 @@ class QATAnalyzer(NSGAAnalyzer):
         self._quantizable_layers = quantizable_layers
         return quantizable_layers
 
-    @staticmethod
-    def transform_to_timeloop_quant_config(quant_conf: OrderedDict) -> Dict[int, Dict[str, int]]:
-        """
-        Transforms the quantization configuration for each layer to include the number of output bits.
 
-        Args:
-            quant_conf (OrderedDict): An ordered dictionary with layer numbers as keys and configurations as values.
+def transform_to_timeloop_quant_config(quant_conf: OrderedDict) -> Dict[int, Dict[str, int]]:
+    """
+    Transforms the quantization configuration for each layer to include the number of output bits.
 
-        Returns:
-            Dict[int, Dict[str, int]]: A transformed configuration dictionary where each layer includes the number of bits for inputs, weights, and outputs.
-        """
-        transformed_config = {}
-        layers = list(quant_conf.keys())
+    Args:
+        quant_conf (OrderedDict): An ordered dictionary with layer numbers as keys and configurations as values.
 
-        for i, layer in enumerate(layers):
-            config = quant_conf[layer]
-            if i < len(layers) - 1:  # If not the last layer
-                next_layer_input = quant_conf[layers[i + 1]]["Inputs"]
-            else:
-                next_layer_input = 8  # Default for the last layer
+    Returns:
+        Dict[int, Dict[str, int]]: A transformed configuration dictionary where each layer includes the number of bits for inputs, weights, and outputs.
+    """
+    transformed_config = {}
+    layers = list(quant_conf.keys())
 
-            transformed_config[layer] = {
-                "Inputs": config["Inputs"],
-                "Weights": config["Weights"],
-                "Outputs": next_layer_input
-            }
-        return transformed_config
+    for i, layer in enumerate(layers):
+        config = quant_conf[layer]
+        if i < len(layers) - 1:  # If not the last layer
+            next_layer_input = quant_conf[layers[i + 1]]["Inputs"]
+        else:
+            next_layer_input = 8  # Default for the last layer
+
+        transformed_config[layer] = {
+            "Inputs": config["Inputs"],
+            "Weights": config["Weights"],
+            "Outputs": next_layer_input
+        }
+    return transformed_config
+
+
+def create_namespace_to_call_train(model_name: str, act_function: str, symmetric_quant: bool, per_channel_quant: bool, data: str, dataset_name: str, train_batch_size: int, test_batch_size: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, verbose: bool, gpu_id: str = "0", pretrained_model: str = "", qat_evaluation_lock: object = None) -> argparse.Namespace:
+    """
+    Creates an argparse.Namespace object with values for calling the QAT training script.
+
+    Args:
+        model_name (str): Name of the model architecture.
+        act_function (str): Activation function used in the model.
+        symmetric_quant (bool): Whether to use symmetric quantization.
+        per_channel_quant (bool): Whether to use per-channel quantization.
+        data (str): Path to the training dataset.
+        dataset_name (str): Name of the dataset.
+        train_batch_size (int): Batch size for training.
+        test_batch_size (int): Batch size for testing.
+        workers (int): Number of worker threads for data loading.
+        qat_epochs (int): Number of epochs for QAT.
+        lr (float): Learning rate.
+        lr_type (str): Type of learning rate scheduler.
+        gamma (float): Factor for learning rate decay.
+        momentum (float): Momentum factor.
+        weight_decay (float): Weight decay factor.
+        manual_seed (int): Seed for random number generators.
+        deterministic (bool): If true, makes operations deterministic.
+        verbose (bool): If true, enables verbose logging.
+        gpu_id (str): GPU identifier. Defaults to "0".
+        pretrained_model (str): Path to the pretrained model. Defaults to an empty string.
+        qat_evaluation_lock: Lock for synchronizing QAT evaluations. Optional.
+
+    Returns:
+        argparse.Namespace: An argparse.Namespace object containing the training script arguments.
+    """
+    # Create a Namespace object with default values
+    args = argparse.Namespace()
+    # Map the instance variables to the namespace arguments
+    # Model options
+    args.pretrained = True if pretrained_model != "" else False
+    args.pretrained_model = pretrained_model
+    args.arch = model_name
+    args.act_function = act_function
+    args.qat = True
+    args.symmetric_quant = symmetric_quant
+    args.per_channel_quant = per_channel_quant
+    args.quant_setting = "non_uniform"
+    args.qat_evaluation_lock = qat_evaluation_lock
+    # Dataset
+    args.data = data
+    args.dataset_name = dataset_name
+    args.train_batch = train_batch_size
+    args.test_batch = test_batch_size
+    args.workers = workers
+    # Train options
+    args.epochs = qat_epochs
+    args.lr = lr
+    args.lr_type = lr_type
+    args.gamma = gamma
+    args.momentum = momentum
+    args.weight_decay = weight_decay
+    args.manual_seed = manual_seed
+    args.deterministic = deterministic
+    args.start_epoch = 0
+    args.freeze_epochs = 0
+    args.warmup_epoch = 0
+    args.resume = False
+    # Device options NOTE potential change
+    args.gpu_id = gpu_id
+    # Miscs
+    args.verbose = verbose
+    args.log = True
+    args.wandb = False
+
+    return args
