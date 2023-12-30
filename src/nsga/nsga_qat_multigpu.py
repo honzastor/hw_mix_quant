@@ -7,6 +7,8 @@ import argparse
 import time
 import datetime
 import copy
+import shutil
+from pathlib import Path
 import torch
 import torchvision.models as models
 from typing import Optional, Dict, List, Any, Tuple, Generator, OrderedDict
@@ -254,8 +256,15 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             start_total = time.time()
             # If accuracy is not precomputed, submit training task
             if "accuracy" not in quant_config:
+                unique_timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S%f')
+                unique_checkpoint_dir = os.path.join(f"generation_{current_gen}", unique_timestamp)
+                checkpoints_dir = unique_checkpoint_dir
+                if self._checkpoints_dir_pattern is not None:
+                    checkpoints_dir = os.path.join(self._checkpoints_dir_pattern % unique_checkpoint_dir)
+                # Store the unique checkpoint directory in the quant_config for later reference
+                quant_config["checkpoints_dir"] = checkpoints_dir
                 # Submit training task on available GPU
-                train_future = self.submit_train_task(quant_config, current_gen)
+                train_future = self.submit_train_task(quant_config, checkpoints_dir, current_gen)
                 train_futures[quant_conf_str] = train_future
 
             # If hardware params are not precomputed, submit Timeloop task
@@ -281,16 +290,62 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                 timeloop_futures[quant_conf_str] = timeloop_future
 
         # Wait for training futures and collect results
-        for quant_conf_str, future in train_futures.items():
-            accuracy, train_time = future.result()
-            quant_conf = json.loads(quant_conf_str)  # Deserializing back to dictionary
-            quant_conf = {int(k): v for k, v in quant_conf.items()}
+        while train_futures:
+            for quant_conf_str, future in list(train_futures.items()):
+                if future.done():
+                    # Retrieve results if training is completed
+                    accuracy, train_time = future.result()
+                    quant_conf = json.loads(quant_conf_str)
+                    quant_conf = {int(k): v for k, v in quant_conf.items()}
+                    corresponding_quant_config = next(filter(lambda x: x["quant_conf"] == quant_conf, quant_configs))
+                    corresponding_quant_config["accuracy"] = accuracy
+                    corresponding_quant_config["train_time"] = train_time
+                    train_futures.pop(quant_conf_str)
+                else:
+                    quant_conf = json.loads(quant_conf_str)
+                    quant_conf = {int(k): v for k, v in quant_conf.items()}
+                    corresponding_quant_config = next(filter(lambda x: x["quant_conf"] == quant_conf, quant_configs))
 
-            # Retrieve the corresponding quant_config
-            corresponding_quant_config = next((setting for setting in quant_configs if setting['quant_conf'] == quant_conf), None)
-            # Update the quant_config with training results
-            corresponding_quant_config["accuracy"] = accuracy
-            corresponding_quant_config["train_time"] = train_time
+                    # Retrieve the training checkpoints directory from the corresponding quant_config
+                    run_checkpoint_dir = corresponding_quant_config.get("checkpoints_dir")
+                    absolute_checkpoint_dir = os.path.abspath(run_checkpoint_dir)
+
+                    if os.path.isdir(absolute_checkpoint_dir):
+                        try:
+                            training_run_dir = str(next(Path(absolute_checkpoint_dir).iterdir()))
+                            # Extract gpu_id from the training run directory name
+                            gpu_id = int(os.path.basename(training_run_dir).split('_')[-1])
+
+                            # Construct paths to the log file and jit model file
+                            log_file_path = Path(os.path.join(training_run_dir, "log.txt"))
+                            jit_model_path = Path(os.path.join(training_run_dir, "jit_model_after_qat.pth.tar"))
+
+                            # Check if the jit model file doesn't exist (otherwise it may wait long until it gets its chance of computing – hopefully no freeze here)
+                            # and if the log file was updated
+                            if not jit_model_path.exists() and log_file_path.exists():
+                                last_modified = log_file_path.stat().st_mtime
+                                current_time = time.time()
+                                if current_time - last_modified < 7 * 60:  # 7 minutes
+                                    # Cancel the current future as it's assumed to be frozen
+                                    future.cancel()
+                                    # Put the GPU ID back into the queue
+                                    self._queue.put(gpu_id)
+                                    print(f"Resubmitting training run on GPU {gpu_id} because it seems frozen!")
+                                    # Delete the outdated checkpoint directory
+                                    shutil.rmtree(run_checkpoint_dir, ignore_errors=True)
+                                    # Resubmit the training task
+                                    unique_timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S%f')
+                                    unique_checkpoint_dir = os.path.join(f"generation_{current_gen}", unique_timestamp)
+                                    new_checkpoints_dir = unique_checkpoint_dir
+                                    if self._checkpoints_dir_pattern is not None:
+                                        new_checkpoints_dir = os.path.join(self._checkpoints_dir_pattern % unique_checkpoint_dir)
+                                    corresponding_quant_config["checkpoints_dir"] = new_checkpoints_dir
+                                    new_future = self.submit_train_task(corresponding_quant_config, new_checkpoints_dir, current_gen)
+                                    train_futures[quant_conf_str] = new_future
+                                    time.sleep(20)  # It may take some time until checkpoint dir is created
+                        except StopIteration:
+                            print("No training run directory found in the checkpoint directory.")
+            time.sleep(10)  # Check futures every 10 seconds
 
         # Wait for Timeloop futures and collect results
         for quant_conf_str, future in timeloop_futures.items():
@@ -321,17 +376,19 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             results.append((accuracy, total_hw_metrics, {"total_time": total_time, "train_time": train_time, "timeloop_time": timeloop_time}))
         return results
 
-    def submit_train_task(self, quant_config: Dict[str, Any], current_gen: int):
+    def submit_train_task(self, quant_config: Dict[str, Any], checkpoints_dir, current_gen: int):
         """
         Submits a QAT training task to the ProcessPoolExecutor for asynchronous execution.
 
         Args:
             quant_config (Dict[str, Any]): The quantization configuration for which to run QAT.
+            checkpoints_dir: The checkpoints directory to store results.
+            current_gen: The current generation number in the NSGA-II process.
 
         Returns:
             concurrent.futures.Future: A Future object representing the asynchronous execution of QAT.
         """
-        return self._gpu_pool.submit(train_task, quant_config, current_gen, self._checkpoints_dir_pattern, self._pretrained_model, self._model_name, self._act_function, self._symmetric_quant, self._per_channel_quant, self._data, self._dataset_name, self._train_batch_size, self._test_batch_size, self._workers, self._qat_epochs, self._lr, self._lr_type, self._gamma, self._momentum, self._weight_decay, self._manual_seed, self._deterministic, self._qat_evaluation_lock, self._verbose, self.queue)
+        return self._gpu_pool.submit(train_task, quant_config, current_gen, checkpoints_dir, self._pretrained_model, self._model_name, self._act_function, self._symmetric_quant, self._per_channel_quant, self._data, self._dataset_name, self._train_batch_size, self._test_batch_size, self._workers, self._qat_epochs, self._lr, self._lr_type, self._gamma, self._momentum, self._weight_decay, self._manual_seed, self._deterministic, self._qat_evaluation_lock, self._verbose, self.queue)
 
     def submit_timeloop_task(self, mapper_facade: MapperFacade, quant_config: Dict[str, Any], in_size: str, num_classes: int) -> concurrent.futures.Future:
         """
@@ -349,14 +406,14 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         return self._timeloop_pool.submit(timeloop_task, mapper_facade, self._pretrained_model, self._model_name, quant_config, in_size, num_classes, self._timeloop_heuristic, self._primary_metric, self._secondary_metric, self._total_valid, self._cache_directory, self._cache_name, self._verbose)
 
 
-def train_task(quant_config: Dict[str, Any], current_gen: int, checkpoints_dir_pattern: str, pretrained_model: str, model_name: str, act_function: str, symmetric_quant: bool, per_channel_quant: bool, data: str, dataset_name: str, train_batch_size: int, test_batch_size: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, qat_evaluation_lock: Optional[object], verbose: bool, gpu_pool_queue: Queue) -> Tuple[float, float]:
+def train_task(quant_config: Dict[str, Any], current_gen: int, checkpoints_dir: str, pretrained_model: str, model_name: str, act_function: str, symmetric_quant: bool, per_channel_quant: bool, data: str, dataset_name: str, train_batch_size: int, test_batch_size: int, workers: int, qat_epochs: int, lr: float, lr_type: str, gamma: float, momentum: float, weight_decay: float, manual_seed: int, deterministic: bool, qat_evaluation_lock: Optional[object], verbose: bool, gpu_pool_queue: Queue) -> Tuple[float, float]:
     """
     Executes a QAT training task on a specified GPU.
 
     Args:
         quant_config: The quantization configuration to be used for training.
         current_gen: The current generation number in the NSGA-II process.
-        checkpoints_dir_pattern: The pattern for generating the checkpoints directory.
+        checkpoints_dir: The checkpoints directory to store results.
         pretrained_model: Path to the pretrained model file.
         model_name: Name of the model architecture to be used.
         act_function: Activation function used in the model.
@@ -388,12 +445,6 @@ def train_task(quant_config: Dict[str, Any], current_gen: int, checkpoints_dir_p
             print(f"Evaluating quant config {quant_config['quant_conf']} on GPU {device_id}")
         # Set the current device for PyTorch
         torch.cuda.set_device(device_id)
-
-        checkpoints_dir = None
-        if checkpoints_dir_pattern is not None:
-            # quant_conf_str = '_'.join(map(lambda x: str(x), quant_conf))
-            # checkpoints_dir = checkpoints_dir_pattern % (quant_conf_str + "_generation_" + str(current_gen))
-            checkpoints_dir = checkpoints_dir_pattern % ("generation_" + str(current_gen))
 
         # Prepare and run training on the specified GPU
         qat_args = create_namespace_to_call_train(gpu_id=device_id, pretrained_model=pretrained_model, model_name=model_name, act_function=act_function, symmetric_quant=symmetric_quant, per_channel_quant=per_channel_quant, data=data, dataset_name=dataset_name, train_batch_size=train_batch_size, test_batch_size=test_batch_size, workers=workers, qat_epochs=qat_epochs, lr=lr, lr_type=lr_type, gamma=gamma, momentum=momentum, weight_decay=weight_decay, manual_seed=manual_seed, deterministic=deterministic, qat_evaluation_lock=qat_evaluation_lock, verbose=verbose)
