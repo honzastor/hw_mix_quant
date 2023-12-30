@@ -598,7 +598,7 @@ def create_namespace_to_call_train(model_name: str, act_function: str, symmetric
     args.symmetric_quant = symmetric_quant
     args.per_channel_quant = per_channel_quant
     args.quant_setting = "non_uniform"
-    args.qat_evaluation_lock = qat_evaluation_lock
+    # args.qat_evaluation_lock = qat_evaluation_lock NOTE not used right now
     # Dataset
     args.data = data
     args.dataset_name = dataset_name
