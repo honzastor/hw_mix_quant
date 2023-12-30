@@ -225,6 +225,8 @@ def setup_device_and_seed(args: argparse.Namespace) -> str:
         str: The string `cuda` if CUDA is available and selected, otherwise `cpu`.
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
     use_cuda = torch.cuda.is_available()
     device = f"cuda:{str(args.gpu_id)}" if use_cuda else "cpu"
 
@@ -545,34 +547,34 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
     """
     Main function for training the model.
 
-    This function can either be called with a set of arguments passed as an `argparse.Namespace` object or it will (by default) parse the command-line arguments. The function sets up the training environment, 
-    loads the data and model, and executes the training and validation process. It supports both standard 
+    This function can either be called with a set of arguments passed as an `argparse.Namespace` object or it will (by default) parse the command-line arguments. The function sets up the training environment,
+    loads the data and model, and executes the training and validation process. It supports both standard
     training and quantization-aware training (QAT).
 
     Args:
-        args (Optional[argparse.Namespace]): A namespace object containing training parameters. If None, 
-        the function will parse command-line arguments. The namespace object should include all the required 
+        args (Optional[argparse.Namespace]): A namespace object containing training parameters. If None,
+        the function will parse command-line arguments. The namespace object should include all the required
         arguments that would otherwise be passed through the command line.
 
     Returns:
-        float: The best accuracy achieved during training. If QAT is enabled, it returns the best accuracy 
+        float: The best accuracy achieved during training. If QAT is enabled, it returns the best accuracy
         of the quantized model; otherwise, it returns the best accuracy of the floating-point model.
     """
     # Parse command-line arguments and initiliaze
     if args is None:
         args = parse_args()
     args.act_function = get_activation_function(args.act_function)
-    if not hasattr(args, 'qat_evaluation_lock') or args.qat_evaluation_lock is None:  # Check if the shared lock is passed (from multigpu nsga), otherwise use a standard lock
-        args.qat_evaluation_lock = Lock()
+    # if not hasattr(args, 'qat_evaluation_lock') or args.qat_evaluation_lock is None:  # Check if the shared lock is passed (from multigpu nsga), otherwise use a standard lock
+    #     args.qat_evaluation_lock = Lock()
     device = setup_device_and_seed(args=args)
     init_wandb_for_train(args=args, device=device)
     logger, checkpoint_dir, settings_log, log_file = init_logging(args=args)
 
     # Log run's settings into JSON
     # Temporarily save and remove the lock from args (TO ENABLE THE DEEPCOPY)
-    temp_lock = args.qat_evaluation_lock if 'qat_evaluation_lock' in args.__dict__ else None
-    if 'qat_evaluation_lock' in args.__dict__:
-        del args.__dict__['qat_evaluation_lock']
+    # temp_lock = args.qat_evaluation_lock if 'qat_evaluation_lock' in args.__dict__ else None
+    # if 'qat_evaluation_lock' in args.__dict__:
+    #     del args.__dict__['qat_evaluation_lock']
     settings = copy.deepcopy(vars(args))
     settings["act_function"] = str(settings["act_function"])
     settings["device"] = str(device)
@@ -580,8 +582,8 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
         json.dump(settings, f, indent=2)
 
     # Restore the lock in args
-    if temp_lock:
-        args.qat_evaluation_lock = temp_lock
+    # if temp_lock:
+    #     args.qat_evaluation_lock = temp_lock
 
     messages = (
         f"Using {device} device\n"
@@ -762,11 +764,11 @@ def main(args: Optional[argparse.Namespace] = None) -> float:
         save_checkpoint(checkpoint_data=model, is_best=False, checkpoint_dir=checkpoint_dir, filename="jit_model_after_qat.pth.tar", jit=True)
 
         # Locked cpu evaluation
-        with args.qat_evaluation_lock:
-            print("\n\n------Testing accuracy after converting the model into INT------")
-            # Setting the batch size for eval low here to prevent possible run out of RAM
-            cpu_val_loader = data_loader.load_validation_data(batch_size=32, num_workers=args.workers, pin_memory=False)
-            int_loss, int_val_top1, int_val_top5 = test(model, cpu_val_loader, criterion, "cpu", log_file)
+        # with args.qat_evaluation_lock:
+        print("\n\n------Testing accuracy after converting the model into INT------")
+        # Setting the batch size for eval low here to prevent possible run out of RAM
+        cpu_val_loader = data_loader.load_validation_data(batch_size=16, num_workers=args.workers, pin_memory=False)
+        int_loss, int_val_top1, int_val_top5 = test(model, cpu_val_loader, criterion, "cpu", log_file)
 
         logger.append(["\n    AFTER QAT", "      Loss", "Top-1 Acc", "Top-5 Acc"])
         logger.append([f"Converted INT model", f"{int_loss:4.6f}", f"{int_val_top1:7.6f}", f"{int_val_top5:9.6f}"])
