@@ -166,7 +166,7 @@ def setup_device_and_seed(args: argparse.Namespace) -> str:
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     use_cuda = torch.cuda.is_available()
-    device = "cuda" if (use_cuda and not args.use_cpu and not args.qat) else "cpu"
+    device = f"cuda:{str(args.gpu_id)}" if (use_cuda and not args.use_cpu and not args.qat) else "cpu"
 
     # Random seed setup
     if args.manual_seed == -1:
@@ -347,7 +347,7 @@ def main() -> None:
     data_loader_class = get_data_loader_class(args.dataset_name)
     data_loader = data_loader_class(dataset_path=args.data)
 
-    val_loader = data_loader.load_validation_data(batch_size=args.test_batch, num_workers=args.workers, pin_memory=device == "cuda")
+    val_loader = data_loader.load_validation_data(batch_size=args.test_batch, num_workers=args.workers, pin_memory=device == f"cuda:{str(args.gpu_id)}")
     num_classes = data_loader.classes
 
     messages = (
