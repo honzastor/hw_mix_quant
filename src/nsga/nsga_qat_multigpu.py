@@ -404,8 +404,6 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         """
         def task():
             device_id = self.queue.get()
-            start_time = time.time()
-            max_duration = 3600  # 1 hour time limit
 
             try:
                 if self._verbose:
