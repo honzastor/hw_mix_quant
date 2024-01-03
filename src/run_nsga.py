@@ -101,7 +101,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--total_valid", type=int, default=0,
                         help="number of total valid mappings to consider across all available mapper threads; "
                         "a value of 0 means that this criteria is not used for thread termination (default: 0)")
-    parser.add_argument("--primary_metric", type=str, default="edp", choices=["energy", "delay", "lla", "edp", "memsize_words"],
+    parser.add_argument("--primary_metric", type=str, default="edp", choices=["energy", "delay", "lla", "edp", "memsize_bytes"],
                         help="primary metric for timeloop-mapper to optimize for; NOTE: this is what NSGA-II acknowledges\n" +
                         "choose from 'energy', 'delay', 'lla', 'edp'  (default: 'edp')")
 

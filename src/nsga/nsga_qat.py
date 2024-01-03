@@ -253,7 +253,7 @@ class QATAnalyzer(NSGAAnalyzer):
     int_metric_key_mapping = {
         "delay": "Cycles",
         "lla": "LastLevelAccesses",
-        "memsize_words": "Weights model memory size [Words]"
+        "memsize_bytes": "Weights model memory size [Bytes]"
     }
 
     def __init__(self, model_name: str, pretrained_model: str, act_function: str, data: str,
@@ -402,7 +402,7 @@ class QATAnalyzer(NSGAAnalyzer):
                 total_edp = cache_sel[0]["total_edp"]
                 total_delay = cache_sel[0]["total_delay"]
                 total_lla = cache_sel[0]["total_lla"]
-                total_memsize = cache_sel[0]["total_memsize_words"]
+                total_memsize = cache_sel[0]["total_memsize_bytes"]
 
                 # Add timing information
                 total_time = cache_sel[0]["total_time"]
@@ -478,7 +478,7 @@ class QATAnalyzer(NSGAAnalyzer):
                 total_edp = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
                 total_delay = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
                 total_lla = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
-                total_memsize = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_words"]]), hardware_params.values()))
+                total_memsize = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_bytes"]]), hardware_params.values()))
             total_time = time.time() - start_total
             # Create output node
             node = node_conf.copy()
@@ -489,7 +489,7 @@ class QATAnalyzer(NSGAAnalyzer):
             node["total_edp"] = total_edp
             node["total_delay"] = total_delay
             node["total_lla"] = total_lla
-            node["total_memsize_words"] = total_memsize
+            node["total_memsize_bytes"] = total_memsize
             # Add timing information
             node["total_time"] = total_time
             node["train_time"] = train_time

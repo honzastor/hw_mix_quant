@@ -214,7 +214,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                 total_delay = cached_entry["total_delay"]
                 total_energy = cached_entry["total_energy"]
                 total_lla = cached_entry["total_lla"]
-                total_memsize = cached_entry["total_memsize_words"]
+                total_memsize = cached_entry["total_memsize_bytes"]
 
                 total_time = cached_entry["total_time"]
                 train_time = cached_entry["train_time"]
@@ -235,7 +235,7 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
             node["total_edp"] = total_edp
             node["total_delay"] = total_delay
             node["total_lla"] = total_lla
-            node["total_memsize_words"] = total_memsize
+            node["total_memsize_bytes"] = total_memsize
             # Add timing information
             node["total_time"] = total_time
             node["train_time"] = train_time
@@ -256,17 +256,28 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         Returns:
             List[Tuple[float, Dict[str, Any], Dict[str, float]]]: A list of tuples containing the accuracy, hardware parameters, and timing metrics.
         """
-        collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla", f"total_memsize_words"]  # NOTE add more if needed
+        # TODO rework needed -> change multihreading with multiprocessing, monitor running tasks and kill/terminate frozen ones based on PID to retrieve resources back
+        collected_params = [f"total_edp", f"total_energy", f"total_delay", f"total_lla", f"total_memsize_bytes"]  # NOTE add more if needed
         train_futures = {}
         timeloop_futures = {}
+        unique_configs = {}
+        duplicate_configs = {}
         results = []
-
+        any_freezes = False  # If any gpu train run seems frozen (random PyTorch DataLoader issue when workers > 0)
         start_total = time.time()
-        # Iterate each quantization configuration and submit tasks for evaluation or retrieve precached metrics
-        for quant_config in quant_configs:
+
+        # Get all unique configs
+        for config in quant_configs:
+            quant_conf_str = json.dumps(config["quant_conf"], sort_keys=True)
+            if quant_conf_str in unique_configs:
+                duplicate_configs.setdefault(quant_conf_str, []).append(config)
+            else:
+                unique_configs[quant_conf_str] = config
+
+        # Iterate each unique quantization configuration and submit tasks for evaluation or retrieve precached metrics
+        for quant_conf_str, quant_config in unique_configs.items():
             # If accuracy is not precomputed, submit training task
             if "accuracy" not in quant_config:
-                quant_conf_str = json.dumps(quant_config["quant_conf"], sort_keys=True)
                 unique_timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S%f')
                 unique_checkpoint_dir = os.path.join(f"generation_{current_gen}", unique_timestamp)
                 checkpoints_dir = unique_checkpoint_dir
@@ -300,30 +311,27 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                 timeloop_future = self.submit_timeloop_task(mapper_facade, quant_config['quant_conf'], in_size, num_classes)
                 timeloop_futures[quant_conf_str] = timeloop_future
 
-        # Wait for training futures and collect results (train runs may sometimes hang.. we need to detect them and also stop (done by time limit in train task execution))
+        # Wait for training futures and collect results (train runs may sometimes hang.. we need to detect them (TODO .. KILL THEM) and resubmit)
         while train_futures:
             for quant_conf_str, future in list(train_futures.items()):
                 if future.done():
                     # Retrieve results if training is completed
                     accuracy, train_time = future.result()
                     print("Training future processed")
-                    quant_conf = json.loads(quant_conf_str)  # Deserializing back to dictionary
-                    quant_conf = {int(k): v for k, v in quant_conf.items()}
 
-                    # Retrieve the corresponding quant_config
-                    corresponding_quant_config = next((setting for setting in quant_configs if setting['quant_conf'] == quant_conf), None)
-                    corresponding_quant_config["accuracy"] = accuracy
-                    corresponding_quant_config["train_time"] = train_time
+                    # Retrieve the corresponding unique quant_config
+                    unique_config = unique_configs[quant_conf_str]
+                    unique_config["accuracy"] = accuracy
+                    unique_config["train_time"] = train_time
+
                     train_futures.pop(quant_conf_str)
                 elif future.running():
                     print(f"Training task for quant config {quant_conf_str} is still running.")
 
-                    quant_conf = json.loads(quant_conf_str)
-                    quant_conf = {int(k): v for k, v in quant_conf.items()}
-                    corresponding_quant_config = next(filter(lambda x: x["quant_conf"] == quant_conf, quant_configs))
+                    unique_config = unique_configs[quant_conf_str]
 
-                    # Retrieve the training checkpoints directory from the corresponding quant_config
-                    run_checkpoint_dir = corresponding_quant_config.get("checkpoints_dir")
+                    # Retrieve the training checkpoints directory from the unique quant_config
+                    run_checkpoint_dir = unique_config.get("checkpoints_dir")
                     absolute_checkpoint_dir = os.path.abspath(run_checkpoint_dir)
 
                     if os.path.isdir(absolute_checkpoint_dir):
@@ -341,8 +349,9 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                             if not jit_model_path.exists() and log_file_path.exists():
                                 last_modified = log_file_path.stat().st_mtime
                                 current_time = time.time()
-                                # NOTE: THIS SHOULD NOT HAPPEN! HUGE PROBLEM AS THE TASK REMAINS RUNNING IN A ZOMBIE MODE..
+                                # NOTE: THIS SHOULD NOT HAPPEN! HUGE PROBLEM AS THE TASK REMAINS RUNNING IN A FROZEN MODE..
                                 if current_time - last_modified > 600:  # 10 minutes
+                                    any_freezes = True
                                     # Put the GPU ID back into the queue
                                     self._queue.put(gpu_id)
                                     print(f"Resubmitting training run on GPU {gpu_id} because it seems frozen!")
@@ -354,8 +363,8 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
                                     new_checkpoints_dir = unique_checkpoint_dir
                                     if self._checkpoints_dir_pattern is not None:
                                         new_checkpoints_dir = os.path.join(self._checkpoints_dir_pattern % unique_checkpoint_dir)
-                                    corresponding_quant_config["checkpoints_dir"] = new_checkpoints_dir
-                                    new_future = self.submit_train_task(corresponding_quant_config["quant_conf"], new_checkpoints_dir)
+                                    unique_config["checkpoints_dir"] = new_checkpoints_dir
+                                    new_future = self.submit_train_task(unique_config["quant_conf"], new_checkpoints_dir)
                                     train_futures[quant_conf_str] = new_future
                         except StopIteration:
                             print("No training run directory found in the checkpoint directory.")
@@ -364,31 +373,34 @@ class MultiGPUQATAnalyzer(QATAnalyzer):
         # Wait for Timeloop futures and collect results
         for quant_conf_str, future in timeloop_futures.items():
             hardware_params, timeloop_time = future.result()
-            quant_conf = json.loads(quant_conf_str)  # Deserializing back to dictionary
-            quant_conf = {int(k): v for k, v in quant_conf.items()}
 
-            # Retrieve the corresponding quant_config
-            corresponding_quant_config = next((setting for setting in quant_configs if setting['quant_conf'] == quant_conf), None)
+            # Retrieve the corresponding unique config and update it
+            unique_config = unique_configs[quant_conf_str]
 
-            # Update the quant_config with the Timeloop results
+            # Update the unique quant_config with the Timeloop results
             # NOTE add more if needed
-            corresponding_quant_config["total_energy"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["energy"]]), hardware_params.values()))
-            corresponding_quant_config["total_edp"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
-            corresponding_quant_config["total_delay"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
-            corresponding_quant_config["total_lla"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
-            corresponding_quant_config["total_memsize_words"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_words"]]), hardware_params.values()))
-            corresponding_quant_config["timeloop_time"] = timeloop_time
+            unique_config["total_energy"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["energy"]]), hardware_params.values()))
+            unique_config["total_edp"] = sum(map(lambda x: float(x[QATAnalyzer.float_metric_key_mapping["edp"]]), hardware_params.values()))
+            unique_config["total_delay"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["delay"]]), hardware_params.values()))
+            unique_config["total_lla"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["lla"]]), hardware_params.values()))
+            unique_config["total_memsize_bytes"] = sum(map(lambda x: int(x[QATAnalyzer.int_metric_key_mapping["memsize_bytes"]]), hardware_params.values()))
+            unique_config["timeloop_time"] = timeloop_time
 
         # Combine and return all results
         for quant_config in quant_configs:
-            # All data should be present in quant_config by now
-            accuracy = quant_config["accuracy"]
-            total_hw_metrics = {param: quant_config[param] for param in collected_params}
-            train_time = quant_config["train_time"]
-            timeloop_time = quant_config["timeloop_time"]
-            total_time = quant_config["total_time"] if "total_time" in quant_config else time.time() - start_total
+            quant_conf_str = json.dumps(quant_config["quant_conf"], sort_keys=True)
+            result_config = unique_configs[quant_conf_str]
+
+            # Extract results from the result config
+            accuracy = result_config["accuracy"]
+            total_hw_metrics = {param: result_config[param] for param in collected_params}
+            train_time = result_config["train_time"]
+            timeloop_time = result_config["timeloop_time"]
+            total_time = result_config["total_time"] if "total_time" in result_config else time.time() - start_total
             results.append((accuracy, total_hw_metrics, {"total_time": total_time, "train_time": train_time, "timeloop_time": timeloop_time}))
 
+        if any_freezes:  # NOTE: this is not a good practice.. but we count on the fact that computational resources (mainly memory) can handle it...
+            self._gpu_pool = ThreadPoolExecutor(max_workers=torch.cuda.device_count())
         return results
 
     def submit_train_task(self, quant_config: Dict[str, Any], checkpoints_dir: str):
